@@ -1,126 +1,14 @@
-import json
 import logging
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Any
 
 import geoutils as gu
 import numpy as np
 import xdem
-from tqdm import tqdm
+
+from .utils import load_dems, save_dem, save_stats_to_file
 
 logger = logging.getLogger("pyasp")
-
-
-def load_dem(
-    dem_path: Path,
-    area_or_point: str = "Area",
-    vrcs: str = None,
-) -> xdem.DEM:
-    """Load DEM from disk"""
-    dem = xdem.DEM(dem_path)
-    dem.set_area_or_point(area_or_point)
-    if vrcs:
-        dem.set_vcrs(vrcs)
-
-    return dem
-
-
-def load_dems(
-    paths: list[Path],
-    parallel: bool = True,
-    num_threads: int = None,
-    exclude_duplicates: bool = False,
-) -> list[xdem.DEM]:
-    """Load DEMs from disk, either in parallel or sequentially.
-
-    Args:
-        paths: List of paths to DEM files
-        parallel: If True, load DEMs in parallel using threading
-        num_threads: Number of threads to use for parallel loading
-        exclude_duplicates: If True, only load unique paths
-
-    Returns:
-        List of loaded DEMs in the same order as input paths
-    """
-    paths = [Path(path) for path in paths]
-
-    if exclude_duplicates:
-        paths = list(dict.fromkeys(paths))  # Preserve order while removing duplicates
-
-    if not parallel:
-        return [load_dem(path) for path in tqdm(paths, desc="Loading DEMs")]
-
-    if num_threads is None:
-        num_threads = min(len(paths), 8)
-
-    results = [None] * len(paths)
-
-    # Store all indices for each path to handle duplicates
-    path_to_indices = {}
-    for idx, path in enumerate(paths):
-        if path in path_to_indices:
-            path_to_indices[path].append(idx)
-        else:
-            path_to_indices[path] = [idx]
-
-    with ThreadPoolExecutor(max_workers=num_threads) as executor:
-        unique_paths = paths if exclude_duplicates else set(paths)
-        futures = {executor.submit(load_dem, path): path for path in unique_paths}
-
-        for future in tqdm(
-            as_completed(futures), total=len(futures), desc="Loading DEMs"
-        ):
-            path = futures[future]
-            indices = path_to_indices[path]
-            try:
-                dem = future.result()
-                logging.debug(f"Loaded DEM: {path.name}, {dem}")
-                # Assign the same DEM to all duplicate indices
-                for idx in indices:
-                    results[idx] = dem
-            except Exception as e:
-                logging.error(f"Error loading DEM from {path}: {e}")
-                for idx in indices:
-                    results[idx] = None
-
-    return results
-
-
-def save_dem(
-    dem: xdem.DEM,
-    save_path: Path,
-    dtype: str | Any = "float32",
-    compress="LZW",
-    **kwargs,
-) -> None:
-    """Save DoD to disk"""
-    if not save_path.parent.exists():
-        save_path.parent.mkdir(parents=True)
-
-    if dem.data.dtype == "float64":
-        dem = dem.astype(dtype)
-
-    dem.save(save_path, dtype=dtype, compress=compress, **kwargs)
-
-
-def save_stats_to_file(diff_stats, output_file, float_precision=4):
-    """Save statistics to a JSON file."""
-    formatted_stats = {
-        k: str(round(v, float_precision)) if isinstance(v, (float, np.float32)) else v
-        for k, v in diff_stats.items()
-    }
-    with open(output_file, "w") as f:
-        json.dump(formatted_stats, f, indent=4)
-
-    logger.info(f"Statistics written to {output_file}")
-
-
-def load_stats_from_file(input_file: Path) -> dict:
-    """Load statistics from a JSON file."""
-    with open(input_file) as f:
-        loaded_stats = json.load(f)
-    return loaded_stats
 
 
 def compute_dod(
@@ -148,14 +36,17 @@ def compute_dod(
     if dem.crs != reference.crs or dem.data.shape != reference.data.shape:
         logger.info("Reprojecting DEM to match the reference DEM...")
         if warp_on == "reference":
-            dem = dem.reproject(reference, resampling=resampling)
+            compare = dem.reproject(reference, resampling=resampling)
         elif warp_on == "dem":
-            dem = reference.reproject(dem, resampling=resampling)
+            compare = reference.reproject(dem, resampling=resampling)
+            reference = dem
         else:
             raise ValueError("Invalid `warp_on` value. Must be 'reference' or 'dem'.")
+    else:
+        compare = dem
 
     # Compute the difference
-    diff = reference - dem
+    diff = reference - compare
 
     return diff
 
