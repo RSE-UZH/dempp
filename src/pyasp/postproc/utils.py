@@ -348,7 +348,7 @@ def compute_dem_difference_stats(
     dem: Path | xdem.DEM,
     reference: Path | xdem.DEM,
     output_dir: Path,
-    mask: gu.Mask | None = None,
+    mask: gu.Mask | Path | None = None,
     resampling: str = "bilinear",
     xlim: tuple[float, float] | None = None,
     plt_cfg: dict | None = None,
@@ -359,7 +359,7 @@ def compute_dem_difference_stats(
         dem: Path to the DEM file or xdem.DEM object to process
         reference: Path to the reference DEM file or xdem.DEM object
         output_dir: Directory where to save output statistics and plots
-        mask: Optional mask for stable areas
+        mask: Optional mask for stable areas, can be a Path or gu.Mask
         resampling: Resampling method for reprojection
         xlim: X-axis limits for the plots as (min, max)
         plt_cfg: Configuration dictionary for plots
@@ -392,7 +392,7 @@ def compute_dem_difference_stats(
 
     # Create output file paths
     output_dir.mkdir(parents=True, exist_ok=True)
-    output_stem = dem.filename.stem if hasattr(dem, "filename") else "diff"
+    output_stem = Path(dem.filename).stem if hasattr(dem, "filename") else "diff"
     stats_file = output_dir / f"{output_stem}_diff_stats.json"
     plot_file = output_dir / f"{output_stem}_diff_plot.png"
     logger.debug(f"Output files: {stats_file}, {plot_file}")
@@ -404,8 +404,13 @@ def compute_dem_difference_stats(
 
     # Apply mask if provided
     if mask is not None:
-        if not isinstance(mask, gu.Mask):
-            raise ValueError("Mask must be a geoutils.Mask object")
+        if isinstance(mask, Path):
+            if not mask.exists():
+                raise FileNotFoundError(f"Mask file not found: {mask}")
+            mask = gu.Mask(mask)
+            mask.set_area_or_point("Point")
+        elif not isinstance(mask, gu.Mask):
+            raise ValueError("Mask must be a Path or geoutils.Mask object")
         mask_warped = mask.reproject(reference)
         diff_masked = diff[mask_warped]
         logger.info("Applied mask to difference")
