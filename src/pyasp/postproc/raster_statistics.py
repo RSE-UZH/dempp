@@ -27,16 +27,32 @@ def save_stats_to_file(
         output_file (Path): Path where to save the JSON file.
         float_precision (int, optional): Number of decimal places for float values. Defaults to 4.
     """
+
+    def _format_value(value: Any, float_precision: int) -> Any:
+        """Format single value with proper type conversion."""
+        if isinstance(value, (np.integer, np.floating)):
+            value = value.item()
+        if isinstance(value, float):
+            return str(round(value, float_precision))
+        return value
+
+    def _format_dict_recursive(data: dict, float_precision: int) -> dict:
+        """Recursively format dictionary values."""
+        formatted = {}
+        for key, value in data.items():
+            if isinstance(value, dict):
+                formatted[key] = _format_dict_recursive(value, float_precision)
+            else:
+                formatted[key] = _format_value(value, float_precision)
+        return formatted
+
     output_file = Path(output_file)
     if output_file.suffix != ".json":
         output_file = output_file.with_suffix(".json")
     if not output_file.parent.exists():
         output_file.parent.mkdir(parents=True)
 
-    formatted_stats = {
-        k: str(round(v, float_precision)) if isinstance(v, float | np.float32) else v
-        for k, v in diff_stats.items()
-    }
+    formatted_stats = _format_dict_recursive(diff_stats, float_precision)
 
     with open(output_file, "w") as f:
         json.dump(formatted_stats, f, indent=4)
@@ -155,26 +171,26 @@ def plot_raster_statistics(
     """
     # Set default parameters for the figure and plots
     fig_params = {
-        "figure_size": (10, 10),
-        "share_x": True,
+        "figsize": (10, 10),
+        "sharex": True,
     }
     ax_params = {
-        "x_ticks": None,
+        "xticks": None,
         "grid": False,
     }
     hist_params = {
         "bins": 50,
         "kde": True,
         "stat": "density",
-        "edge_color": "black",
+        "edgecolor": "black",
     }
     box_params = {
         "orient": "h",
         "width": 0.5,
-        "color": "blue",
+        "color": "skyblue",
     }
     annotate_params = {
-        "font_size": 10,
+        "fontsize": 10,
     }
     save_params = {
         "dpi": 300,
@@ -247,6 +263,7 @@ def compute_dod_stats(
     output_dir: Path = None,
     figure_path: Path | None = None,
     resampling: str = "bilinear",
+    skip_plot: bool = False,
     xlim: tuple[float, float] | None = None,
     plt_cfg: dict | None = None,
 ) -> tuple[dict[str, float], Path, Path]:
@@ -287,21 +304,6 @@ def compute_dod_stats(
     if not isinstance(dem, xdem.DEM) or not isinstance(reference, xdem.DEM):
         raise ValueError("Both dem and reference must be Path or xdem.DEM objects")
 
-    # Define output path
-    if figure_path is not None:
-        figure_path = Path(figure_path)
-    else:
-        if output_dir is None:
-            output_dir = Path.cwd()
-        output_dir = Path(output_dir)
-        try:
-            output_stem = Path(dem.filename).stem
-        except (AttributeError, TypeError):
-            logger.warning("Unable to get DEM filename. Using default name")
-            output_stem = "stats"
-        figure_path = output_dir / f"{output_stem}_diff_plot.png"
-    figure_path.parent.mkdir(parents=True, exist_ok=True)
-
     # Compute the difference
     compare = dem.reproject(reference, resampling=resampling)
     diff = reference - compare
@@ -327,15 +329,32 @@ def compute_dod_stats(
     diff_stats = compute_raster_statistics(raster=diff, mask=mask_warped)
 
     # Make plots
-    plt_cfg = plt_cfg or {}
-    plot_raster_statistics(
-        diff_masked,
-        diff_stats,
-        output_file=figure_path,
-        xlim=xlim,
-        **plt_cfg,
-    )
-    logger.debug(f"Saved plot: {figure_path}")
+    if not skip_plot:
+        # Define output path
+        if figure_path is not None:
+            figure_path = Path(figure_path)
+        else:
+            if output_dir is None:
+                output_dir = Path.cwd()
+            output_dir = Path(output_dir)
+            try:
+                output_stem = Path(dem.filename).stem
+            except (AttributeError, TypeError):
+                logger.warning("Unable to get DEM filename. Using default name")
+                output_stem = "stats"
+            figure_path = output_dir / f"{output_stem}_diff_plot.png"
+        figure_path.parent.mkdir(parents=True, exist_ok=True)
+
+        if plt_cfg is None:
+            plt_cfg = {}
+        plot_raster_statistics(
+            diff_masked,
+            diff_stats,
+            output_file=figure_path,
+            xlim=xlim,
+            **plt_cfg,
+        )
+        logger.debug(f"Saved plot: {figure_path}")
 
     return diff_stats
 
