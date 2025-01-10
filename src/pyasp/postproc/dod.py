@@ -6,7 +6,8 @@ import geoutils as gu
 import numpy as np
 import xdem
 
-from .utils import load_dems, save_dem, save_stats_to_file
+from .raster_statistics import save_stats_to_file
+from .utils import load_dems, save_dem
 
 logger = logging.getLogger("pyasp")
 
