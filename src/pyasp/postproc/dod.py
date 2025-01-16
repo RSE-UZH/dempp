@@ -74,7 +74,7 @@ def compute_dod_stats(
     dod_path: Path | None = None,
     make_plot: bool = False,
     output_dir: Path | None = None,
-    figure_path: Path | None = None,
+    output_prefix: str | None = None,
     xlim: tuple[float, float] | None = None,
     plt_cfg: dict | None = None,
     warp_on: str = "reference",
@@ -154,23 +154,25 @@ def compute_dod_stats(
     else:
         output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    try:
-        output_stem = Path(dem.filename).stem
-    except (AttributeError, TypeError):
-        logger.warning("Unable to get DEM filename. Using default name")
-        output_stem = "stats"
+    if output_prefix is None:
+        try:
+            output_prefix = Path(dem.filename).stem
+        except (AttributeError, TypeError):
+            logger.warning("Unable to get DEM filename. Using default name")
+            output_prefix = "stats"
 
     # Save statistics to file
     try:
-        diff_stats.save(output_dir / f"{output_stem}_stats.json")
-        logger.info(f"Saved statistics to: {output_dir / f'{output_stem}_stats.json'}")
+        stats_path = output_dir / f"{output_prefix}_stats.json"
+        diff_stats.save(stats_path)
+        logger.info(f"Saved statistics to: {stats_path}")
     except Exception as e:
         logger.error(f"Error saving statistics: {e}")
 
-    # Make plot
+    # Make plot and save if requested
     if make_plot:
-        if figure_path is None:
-            figure_path = output_dir / f"{output_stem}_diff_plot.png"
+        logger.info("Generating difference plot...")
+        figure_path = output_dir / f"{output_prefix}_plot.png"
         if plt_cfg is None:
             plt_cfg = {}
         try:

@@ -229,7 +229,7 @@ def plot_raster_statistics(
         )
         plt.figtext(
             0.8,
-            0.85,
+            0.8,
             stats_text,
             bbox=dict(facecolor="white", alpha=0.5),
             **annotate_params,
@@ -287,8 +287,6 @@ def save_stats_to_file(
 
     with open(output_file, "w") as f:
         json.dump(formatted_stats, f, indent=4)
-
-    logger.info(f"Statistics written to {output_file}")
 
 
 def load_stats_from_file(input_file: Path) -> RasterStatistics:
