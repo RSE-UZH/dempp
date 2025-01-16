@@ -20,10 +20,12 @@ class RasterStatistics:
     """Container for raster statistics with strict typing."""
 
     mean: float
-    median: float
     std: float
     min: float
     max: float
+    percentile25: float
+    median: float
+    percentile75: float
     nmad: float
     valid_percentage: float
 
@@ -60,7 +62,7 @@ class RasterStatistics:
 
 def compute_raster_statistics(
     raster: xdem.DEM | np.ma.MaskedArray,
-    mask: gu.Mask | None = None,
+    mask: gu.Mask | np.ma.MaskedArray | None = None,
     output_file: Path | None = None,
 ) -> dict[str, float]:
     """Compute statistics for a raster.
@@ -77,6 +79,11 @@ def compute_raster_statistics(
     elif not isinstance(raster, np.ma.MaskedArray):
         raise TypeError("Input raster must be a masked array or xdem.DEM object.")
 
+    if isinstance(mask, gu.Mask):
+        mask = mask.data
+    elif not isinstance(mask, np.ma.MaskedArray):
+        logger.warning("Invalid mask provided. Using all pixels.")
+        mask = None
     if mask is None:
         mask = np.ones_like(raster, dtype=bool)
 
@@ -85,11 +92,12 @@ def compute_raster_statistics(
 
     # Compute statistics in parallel
     mean = da.mean(raster_dask)
-    median = da.percentile(raster_dask, 50)
     std = da.std(raster_dask)
     min_val = da.min(raster_dask)
     max_val = da.max(raster_dask)
-    nmad = da.map_blocks(xdem.spatialstats.nmad, raster_dask)
+    percentile25 = da.percentile(raster_dask, 25)
+    median = da.percentile(raster_dask, 50)
+    percentile75 = da.percentile(raster_dask, 75)
 
     # Compute the number of empty cells and percentage of valid cells
     empty_cells = raster.mask.sum()
@@ -99,11 +107,13 @@ def compute_raster_statistics(
     # Compute the statistics
     stats = RasterStatistics(
         mean=mean.compute(),
-        median=median.compute()[0],
         std=std.compute(),
         min=min_val.compute(),
         max=max_val.compute(),
-        nmad=nmad.compute(),
+        percentile25=percentile25.compute()[0],
+        median=median.compute()[0],
+        percentile75=percentile75.compute()[0],
+        nmad=xdem.spatialstats.nmad(raster_dask),
         valid_percentage=round(valid_cells_percentage, 2),
     )
 
@@ -125,10 +135,10 @@ def plot_raster_statistics(
     annotate_cfg: dict | None = None,
     save_cfg: dict | None = None,
 ) -> tuple[plt.Figure, tuple[plt.Axes, plt.Axes]]:
-    """Plot histogram with KDE and boxplot of DEM differences.
+    """Plot histogram with KDE and boxplot of a r.
 
     Args:
-        raster (np.ma.MaskedArray): Masked array of DEM differences.
+        raster (np.ma.MaskedArray): Masked array of.
         output_file (Path | str | None, optional): Path to save the output figure. Defaults to None.
         stats (RasterStatistics | None, optional): Statistics object to annotate on the plot. Defaults to None.
         xlim (tuple[float, float] | None, optional): Tuple of (min, max) to set x-axis limits. Defaults to None.

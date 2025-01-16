@@ -37,15 +37,13 @@ def compute_dod(
     """
     # Check if the DEMs have the same CRS
     if dem.crs != reference.crs or dem.transform != reference.transform:
-        logger.info(
-            "DEM and reference DEM have different CRS or dimensions. Reprojecting..."
-        )
+        logger.info("DEM and reference DEM have different CRS or dimensions.")
         if warp_on == "reference":
-            logger.info("Reprojecting DEM to match the reference DEM...")
+            logger.info("\tReprojecting DEM to match the reference DEM...")
             A = dem.reproject(reference, resampling=resampling)
             B = reference
         elif warp_on == "dem":
-            logger.info("Reprojecting reference DEM to match the DEM...")
+            logger.info("\tReprojecting reference DEM to match the DEM...")
             A = dem
             B = reference.reproject(dem, resampling=resampling)
         else:
@@ -102,8 +100,6 @@ def compute_dod_stats(
         ValueError: If input DEMs are not valid or compatible.
         FileNotFoundError: If input paths don't exist.
     """
-    logger.info("Processing DEM pair")
-
     # Load DEMs if paths are provided
     if isinstance(dem, (Path | str)):
         dem = Path(dem)
@@ -126,6 +122,7 @@ def compute_dod_stats(
         raise ValueError("Error computing difference between DEMs")
     logger.info("Computed difference between DEMs")
 
+    # Save difference DEM if path is provided
     if dod_path is not None:
         dod_path = Path(dod_path)
         diff.save(dod_path)
@@ -144,152 +141,52 @@ def compute_dod_stats(
         diff_masked = diff[mask_warped]
         logger.info("Applied mask to difference")
     else:
-        diff_masked = diff
+        diff_masked = diff.data
         mask_warped = None
 
     # Compute statistics
     diff_stats = compute_raster_statistics(raster=diff, mask=mask_warped)
+    logger.info("Computed statistics for difference DEM")
+
+    # Define output directory and output stem
+    if output_dir is None:
+        output_dir = Path.cwd()
+    else:
+        output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        output_stem = Path(dem.filename).stem
+    except (AttributeError, TypeError):
+        logger.warning("Unable to get DEM filename. Using default name")
+        output_stem = "stats"
+
+    # Save statistics to file
+    try:
+        diff_stats.save(output_dir / f"{output_stem}_stats.json")
+        logger.info(f"Saved statistics to: {output_dir / f'{output_stem}_stats.json'}")
+    except Exception as e:
+        logger.error(f"Error saving statistics: {e}")
 
     # Make plot
     if make_plot:
-        if figure_path is not None:
-            figure_path = Path(figure_path)
-            output_dir = figure_path.parent
-        else:
-            if output_dir is None:
-                output_dir = Path.cwd()
-            output_dir = Path(output_dir)
-            try:
-                output_stem = Path(dem.filename).stem
-            except (AttributeError, TypeError):
-                logger.warning("Unable to get DEM filename. Using default name")
-                output_stem = "stats"
+        if figure_path is None:
             figure_path = output_dir / f"{output_stem}_diff_plot.png"
-
-        output_dir.mkdir(parents=True, exist_ok=True)
-
         if plt_cfg is None:
             plt_cfg = {}
-        plot_raster_statistics(
-            raster=diff_masked.data,
-            output_file=figure_path,
-            stats=diff_stats,
-            xlim=xlim,
-            **plt_cfg,
-        )
-        logger.info(f"Figure saved to: {figure_path}")
-
-        # Save statistics to file
-        stats_path = figure_path.with_suffix(".json")
-        diff_stats.save(stats_path)
+        try:
+            plot_raster_statistics(
+                raster=diff_masked,
+                output_file=figure_path,
+                stats=diff_stats,
+                xlim=xlim,
+                **plt_cfg,
+            )
+            logger.info(f"Figure saved to: {figure_path}")
+        except Exception as e:
+            logger.error(f"Error saving figure: {e}")
 
     return diff_stats
 
-
-# OLD FUNCTION
-# def process_dem(
-#     dem: Path | xdem.DEM,
-#     reference_dem: Path | xdem.DEM,
-#     glacier_outlines: Path | gu.Vector | None = None,
-#     diff_dem_path: Path | None = None,
-#     diff_stats_path: Path | None = None,
-#     eval_folder: Path | None = None,
-#     verbose: bool = False,
-#     use_parent_as_name: bool = False,
-# ) -> dict | None:
-#     """Process DEM and compute differences with reference DEM.
-
-#     Args:
-#         dem: Input DEM file path or xdem.DEM object
-#         reference_dem: Reference DEM file path or xdem.DEM object
-#         glacier_outlines: Optional glacier outlines for masking
-#         diff_dem_path: Explicit path for difference DEM output
-#         diff_stats_path: Explicit path for statistics output
-#         eval_folder: Folder for outputs (used if specific paths not provided)
-#         verbose: Enable detailed logging
-#         use_parent_as_name: Use parent folder name instead of file stem
-
-#     Returns:
-#         Dictionary with computed statistics or None if error occurs
-
-#     Raises:
-#         ValueError: If no output location is specified
-#     """
-#     # Get DEM name for default filenames
-#     if isinstance(dem, Path):
-#         dem_name = dem.parent.name if use_parent_as_name else dem.stem
-#     elif isinstance(dem, xdem.DEM):
-#         path = Path(dem.name)
-#         dem_name = path.parent.name if use_parent_as_name else path.stem
-#     else:
-#         dem_name = "input_dem"
-
-#     # Validate output locations
-#     if not any([diff_dem_path, diff_stats_path, eval_folder]):
-#         raise ValueError(
-#             "Must specify either output paths (diff_dem_path, diff_stats_path) "
-#             "or eval_folder for outputs"
-#         )
-
-#     # Set output paths with priority for explicit paths and create directories
-#     eval_folder = Path(eval_folder) if eval_folder else None
-#     diff_dem_path = Path(diff_dem_path) if diff_dem_path else None
-#     diff_stats_path = Path(diff_stats_path) if diff_stats_path else None
-#     if diff_dem_path is None and eval_folder:
-#         diff_dem_path = eval_folder / f"{dem_name}_dod.tif"
-#     elif diff_dem_path is None:
-#         diff_dem_path = dem.parent / f"{dem_name}_dod.tif"
-#     if diff_stats_path is None and eval_folder:
-#         diff_stats_path = eval_folder / f"{dem_name}_dod_stats.json"
-#     elif diff_stats_path is None:
-#         diff_stats_path = diff_dem_path.parent / f"{dem_name}_dod_stats.json"
-#     for path in [diff_dem_path, diff_stats_path]:
-#         path.parent.mkdir(parents=True, exist_ok=True)
-
-#     # Load DEMs if paths are provided, otherwise assume they are already xdem.DEM objects
-#     if isinstance(dem, Path) and isinstance(reference_dem, Path):
-#         logger.info(f"Loading DEMs: {dem_name} and reference DEM...")
-#         dem, reference_dem = load_dems([dem, reference_dem])
-#     elif isinstance(dem, Path):
-#         logger.info(f"Loading DEM: {dem_name}...")
-#         dem = xdem.DEM(dem)
-#     elif isinstance(reference_dem, Path):
-#         logger.info("Loading reference DEM...")
-#         reference_dem = xdem.DEM(reference_dem)
-#     if not isinstance(dem, xdem.DEM) or not isinstance(reference_dem, xdem.DEM):
-#         raise ValueError("Invalid DEM or reference DEM provided.")
-
-#     # Load and process glacier outlines if provided
-#     if glacier_outlines is not None:
-#         logger.info("Loading glacier outlines...")
-#         if isinstance(glacier_outlines, Path):
-#             glacier_outlines = gu.Vector(glacier_outlines)
-#             glacier_outlines = glacier_outlines.crop(reference_dem, clip=True)
-#         stable_mask = ~glacier_outlines.create_mask(raster=reference_dem)
-#     else:
-#         stable_mask = None  # No masking if glacier_outlines is None
-
-#     # Compute differences between DEMs and relevant statistics
-#     logger.info("Computing Dem of Difference...")
-#     dod = compute_dod(dem=dem, reference=reference_dem, resampling="bilinear")
-
-#     # Save DoD and compute statistics in separate threads
-#     with ThreadPoolExecutor(max_workers=2) as executor:
-#         save_future = executor.submit(
-#             save_dem, dod, diff_dem_path, dtype="float32", compress="lzw"
-#         )
-#         stats_future = executor.submit(
-#             compute_dod_statistics,
-#             diff=dod,
-#             stable_mask=stable_mask,
-#             output_file=diff_stats_path,
-#         )
-#         save_future.result()  # This will raise any exceptions that occurred
-#         diff_stats = stats_future.result()
-
-#     logger.info(f"Processed DEM: {dem_name} successfully.")
-
-#     return dod, diff_stats
 
 if __name__ == "__main__":
     dem_2009 = xdem.DEM(xdem.examples.get_path("longyearbyen_ref_dem"))
