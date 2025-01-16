@@ -38,7 +38,7 @@ class RasterStatistics:
 
     def __str__(self) -> str:
         """Return string representation of the statistics."""
-        return "\n".join(
+        return " ".join(
             [f"{key}: {value:.2f}" for key, value in self.to_dict().items()]
         )
 
@@ -286,11 +286,16 @@ def load_stats_from_file(input_file: Path) -> RasterStatistics:
         RasterStatistics: Statistics object loaded from file.
 
     Raises:
-        JSONDecodeError: If file contains invalid JSON
+        JSONDecodeError: If file contains invalid JSONupdate the function load_stats_from_file to convert the fields from strings to numerics when reading the json file
+
+
         KeyError: If JSON is missing required statistics fields
     """
     with open(input_file) as f:
         loaded_stats = json.load(f)
+
+    # Convert string values to float
+    loaded_stats = {key: float(value) for key, value in loaded_stats.items()}
 
     return RasterStatistics.from_dict(loaded_stats)
 

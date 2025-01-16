@@ -9,8 +9,6 @@ from tqdm import tqdm
 
 logger = logging.getLogger("pyasp")
 
-# Added dummy line
-
 
 def load_dem(
     dem_path: Path,
