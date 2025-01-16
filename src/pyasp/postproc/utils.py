@@ -1,4 +1,3 @@
-import json
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -127,46 +126,3 @@ def save_dem(
         dem = dem.astype(dtype)
 
     dem.save(save_path, dtype=dtype, compress=compress, **kwargs)
-
-
-def save_stats_to_file(
-    diff_stats: dict[str, Any],
-    output_file: Path,
-    float_precision: int = 4,
-) -> None:
-    """Save statistics to a JSON file.
-
-    Args:
-        diff_stats: Dictionary of statistics to save
-        output_file: Path where to save the JSON file
-        float_precision: Number of decimal places for float values
-    """
-    output_file = Path(output_file)
-    if output_file.suffix != ".json":
-        output_file = output_file.with_suffix(".json")
-    if not output_file.parent.exists():
-        output_file.parent.mkdir(parents=True)
-
-    formatted_stats = {
-        k: str(round(v, float_precision)) if isinstance(v, float | np.float32) else v
-        for k, v in diff_stats.items()
-    }
-
-    with open(output_file, "w") as f:
-        json.dump(formatted_stats, f, indent=4)
-
-    logger.info(f"Statistics written to {output_file}")
-
-
-def load_stats_from_file(input_file: Path) -> dict[str, Any]:
-    """Load statistics from a JSON file.
-
-    Args:
-        input_file: Path to the JSON file containing statistics
-
-    Returns:
-        Dictionary of loaded statistics
-    """
-    with open(input_file) as f:
-        loaded_stats = json.load(f)
-    return loaded_stats

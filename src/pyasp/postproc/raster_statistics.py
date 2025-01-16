@@ -1,6 +1,5 @@
 import json
 import logging
-from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
@@ -11,67 +10,94 @@ import matplotlib.pyplot as plt
 import numpy as np
 import seaborn as sns
 import xdem
+from dask import visualize
 
 logger = logging.getLogger("pyasp")
 
 
-@dataclass()
-class RasterStatistics:
-    """Container for raster statistics with strict typing."""
+def save_stats_to_file(
+    diff_stats: dict[str, Any],
+    output_file: Path,
+    float_precision: int = 4,
+) -> None:
+    """Save statistics to a JSON file.
 
-    mean: float
-    median: float
-    std: float
-    min: float
-    max: float
-    nmad: float
-    valid_percentage: float
+    Args:
+        diff_stats (dict[str, Any]): Dictionary of statistics to save.
+        output_file (Path): Path where to save the JSON file.
+        float_precision (int, optional): Number of decimal places for float values. Defaults to 4.
+    """
 
-    def to_dict(self) -> dict[str, float]:
-        """Convert statistics to dictionary."""
-        return asdict(self)
+    def _format_value(value: Any, float_precision: int) -> Any:
+        """Format single value with proper type conversion."""
+        if isinstance(value, (np.integer | np.floating)):
+            value = value.item()
+        if isinstance(value, float):
+            return str(round(value, float_precision))
+        return value
 
-    @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "RasterStatistics":
-        """Create RasterStatistics from dictionary."""
-        return cls(**data)
+    def _format_dict_recursive(data: dict, float_precision: int) -> dict:
+        """Recursively format dictionary values."""
+        formatted = {}
+        for key, value in data.items():
+            if isinstance(value, dict):
+                formatted[key] = _format_dict_recursive(value, float_precision)
+            else:
+                formatted[key] = _format_value(value, float_precision)
+        return formatted
 
-    def __str__(self) -> str:
-        """Return string representation of the statistics."""
-        return "\n".join(
-            [f"{key}: {value:.2f}" for key, value in self.to_dict().items()]
-        )
+    output_file = Path(output_file)
+    if output_file.suffix != ".json":
+        output_file = output_file.with_suffix(".json")
+    if not output_file.parent.exists():
+        output_file.parent.mkdir(parents=True)
 
-    def __repr__(self) -> str:
-        """Return string representation of the statistics."""
-        return self.__str__()
+    formatted_stats = _format_dict_recursive(diff_stats, float_precision)
 
-    def save(self, output_file: Path) -> None:
-        """Save statistics to a JSON file."""
-        output_file = Path(output_file)
-        output_file.parent.mkdir(parents=True, exist_ok=True)
-        save_stats_to_file(self, output_file)
+    with open(output_file, "w") as f:
+        json.dump(formatted_stats, f, indent=4)
+
+    logger.info(f"Statistics written to {output_file}")
+
+
+def load_stats_from_file(input_file: Path) -> dict[str, Any]:
+    """Load statistics from a JSON file.
+
+    Args:
+        input_file (Path): Path to the JSON file containing statistics.
+
+    Returns:
+        dict[str, Any]: Dictionary of loaded statistics.
+    """
+    with open(input_file) as f:
+        loaded_stats = json.load(f)
+    return loaded_stats
 
 
 def compute_raster_statistics(
-    raster: xdem.DEM | np.ma.MaskedArray,
+    raster: np.ma.MaskedArray,
     mask: gu.Mask | None = None,
     output_file: Path | None = None,
+    graph_output_file: Path | None = None,
 ) -> dict[str, float]:
-    """Compute statistics for a raster.
+    """Compute statistics for a DEM difference raster.
+
     Args:
-        raster (xdem.DEM | np.ma.MaskedArray): DEM raster or masked array.
-        mask (gu.Mask | None, optional): Inlier mask where statistics are to be computed.
-        output_file (Path | None, optional): Path to save statistics JSON file.
+        raster (np.ma.MaskedArray): The difference raster as a masked array.
+        mask (gu.Mask | None, optional): Inlier mask where statistics are to be computed. Defaults to None.
+        output_file (Path | None, optional): Path to save statistics JSON file. Defaults to None.
+        graph_output_file (Path | None, optional): Path to save computation graph visualization. Defaults to None.
 
     Returns:
-        RasterStatistics: Container with computed statistics.
+        dict[str, float]: Dictionary containing computed statistics:
+            - mean: Mean difference
+            - median: Median difference
+            - std: Standard deviation
+            - min: Minimum value
+            - max: Maximum value
+            - nmad: Normalized median absolute deviation
+            - valid_percentage: Percentage of valid cells
     """
-    if isinstance(raster, xdem.DEM):
-        raster = raster.data
-    elif not isinstance(raster, np.ma.MaskedArray):
-        raise TypeError("Input raster must be a masked array or xdem.DEM object.")
-
     if mask is None:
         mask = np.ones_like(raster, dtype=bool)
 
@@ -86,32 +112,36 @@ def compute_raster_statistics(
     max_val = da.max(raster_dask)
     nmad = da.map_blocks(xdem.spatialstats.nmad, raster_dask)
 
+    if graph_output_file is not None:
+        visualize(mean, median, std, min_val, max_val, nmad, filename=graph_output_file)
+
     # Compute the number of empty cells and percentage of valid cells
-    empty_cells = raster.mask.sum()
-    total_cells = raster.size
+    empty_cells = raster.data.mask.sum()
+    total_cells = raster.data.size
     valid_cells_percentage = (1 - empty_cells / total_cells) * 100
 
     # Compute the statistics
-    stats = RasterStatistics(
-        mean=mean.compute(),
-        median=median.compute()[0],
-        std=std.compute(),
-        min=min_val.compute(),
-        max=max_val.compute(),
-        nmad=nmad.compute(),
-        valid_percentage=round(valid_cells_percentage, 2),
-    )
+    raster_stats = {
+        "mean": mean.compute(),
+        "median": median.compute()[0],
+        "std": std.compute(),
+        "min": min_val.compute(),
+        "max": max_val.compute(),
+        "nmad": nmad.compute(),
+        "valid_percentage": round(valid_cells_percentage, 2),
+    }
 
+    # Save the statistics to a file
     if output_file is not None:
-        stats.save(output_file)
+        save_stats_to_file(raster_stats, output_file)
 
-    return stats
+    return raster_stats
 
 
 def plot_raster_statistics(
     raster: np.ma.MaskedArray,
+    stats: dict[str, float],
     output_file: Path | str | None = None,
-    stats: RasterStatistics = None,
     xlim: tuple[float, float] | None = None,
     fig_cfg: dict | None = None,
     ax_cfg: dict | None = None,
@@ -124,8 +154,8 @@ def plot_raster_statistics(
 
     Args:
         raster (np.ma.MaskedArray): Masked array of DEM differences.
+        stats (dict[str, float]): Dictionary of computed statistics.
         output_file (Path | str | None, optional): Path to save the output figure. Defaults to None.
-        stats (RasterStatistics | None, optional): Statistics object to annotate on the plot. Defaults to None.
         xlim (tuple[float, float] | None, optional): Tuple of (min, max) to set x-axis limits. Defaults to None.
         fig_cfg (dict | None, optional): Configuration for plt.subplots() call. Defaults to None.
         ax_cfg (dict | None, optional): Configuration for axes (xticks, grid, etc.). Defaults to None.
@@ -208,17 +238,14 @@ def plot_raster_statistics(
         ax2.grid(grid)
 
     # Add statistics to the plot
-    if stats is not None:
-        stats_text = "\n".join(
-            [f"{key}: {value:.2f}" for key, value in stats.to_dict().items()]
-        )
-        plt.figtext(
-            0.8,
-            0.85,
-            stats_text,
-            bbox=dict(facecolor="white", alpha=0.5),
-            **annotate_params,
-        )
+    stats_text = "\n".join([f"{key}: {value:.2f}" for key, value in stats.items()])
+    plt.figtext(
+        0.8,
+        0.85,
+        stats_text,
+        bbox=dict(facecolor="white", alpha=0.5),
+        **annotate_params,
+    )
 
     # Adjust layout and save the figure
     fig.tight_layout()
@@ -229,70 +256,107 @@ def plot_raster_statistics(
     return fig, (ax1, ax2)
 
 
-def save_stats_to_file(
-    stats: RasterStatistics,
-    output_file: Path,
-    float_precision: int = 3,
-) -> None:
-    """Save statistics to a JSON file.
+def compute_dod_stats(
+    dem: Path | xdem.DEM,
+    reference: Path | xdem.DEM,
+    mask: gu.Mask | Path | None = None,
+    output_dir: Path = None,
+    figure_path: Path | None = None,
+    resampling: str = "bilinear",
+    skip_plot: bool = False,
+    xlim: tuple[float, float] | None = None,
+    plt_cfg: dict | None = None,
+) -> tuple[dict[str, float], Path, Path]:
+    """Compute difference between two DEMs, calculate statistics and generate plots.
 
     Args:
-        stats (RasterStatistics): Statistics object to save
-        output_file (Path): Path to save the JSON file
-        float_precision (int, optional): Number of decimal places for float values. Defaults to 3.
-    """
-
-    def _format_value(value: Any, float_precision: int) -> Any:
-        """Format single value with proper type conversion."""
-        if isinstance(value, (np.integer | np.floating)):
-            value = value.item()
-        if isinstance(value, float):
-            return str(round(value, float_precision))
-        return value
-
-    def _format_dict_recursive(data: dict, float_precision: int) -> dict:
-        """Recursively format dictionary values."""
-        formatted = {}
-        for key, value in data.items():
-            if isinstance(value, dict):
-                formatted[key] = _format_dict_recursive(value, float_precision)
-            else:
-                formatted[key] = _format_value(value, float_precision)
-        return formatted
-
-    output_file = Path(output_file)
-    if output_file.suffix != ".json":
-        output_file = output_file.with_suffix(".json")
-    if not output_file.parent.exists():
-        output_file.parent.mkdir(parents=True)
-
-    # Convert to dict and format floats
-    stats_dict = stats.to_dict()
-    formatted_stats = _format_dict_recursive(stats_dict, float_precision)
-
-    with open(output_file, "w") as f:
-        json.dump(formatted_stats, f, indent=4)
-
-    logger.info(f"Statistics written to {output_file}")
-
-
-def load_stats_from_file(input_file: Path) -> RasterStatistics:
-    """Load statistics from a JSON file.
-
-    Args:
-        input_file (Path): Path to the JSON file containing statistics.
+        dem (Path | xdem.DEM): Path to the DEM file or xdem.DEM object to process.
+        reference (Path | xdem.DEM): Path to the reference DEM file or xdem.DEM object.
+        output_dir (Path, optional): Directory where to save output statistics and plots. Defaults to None.
+        mask (gu.Mask | Path | None, optional): Optional mask for stable areas, can be a Path or gu.Mask. Defaults to None.
+        resampling (str, optional): Resampling method for reprojection. Defaults to "bilinear".
+        xlim (tuple[float, float] | None, optional): X-axis limits for the plots as (min, max). Defaults to None.
+        plt_cfg (dict | None, optional): Configuration dictionary for plots. Defaults to None.
 
     Returns:
-        RasterStatistics: Statistics object loaded from file.
+        tuple[dict[str, float], Path, Path]: Tuple containing:
+            - Dictionary of computed statistics.
+            - Path to the saved statistics file.
+            - Path to the saved plot file.
 
     Raises:
-        JSONDecodeError: If file contains invalid JSON
-        KeyError: If JSON is missing required statistics fields
+        ValueError: If input DEMs are not valid or compatible.
+        FileNotFoundError: If input paths don't exist.
     """
-    with open(input_file) as f:
-        loaded_stats = json.load(f)
+    logger.info("Processing DEM pair")
 
-    return RasterStatistics.from_dict(loaded_stats)
+    # Load DEMs if paths are provided
+    if isinstance(dem, Path):
+        if not dem.exists():
+            raise FileNotFoundError(f"DEM file not found: {dem}")
+        dem = xdem.DEM(dem)
+    if isinstance(reference, Path):
+        if not reference.exists():
+            raise FileNotFoundError(f"Reference DEM file not found: {reference}")
+        reference = xdem.DEM(reference)
+
+    # Validate inputs
+    if not isinstance(dem, xdem.DEM) or not isinstance(reference, xdem.DEM):
+        raise ValueError("Both dem and reference must be Path or xdem.DEM objects")
+
+    # Compute the difference
+    compare = dem.reproject(reference, resampling=resampling)
+    diff = reference - compare
+    logger.info("Computed difference between DEMs")
+
+    # Apply mask if provided
+    if mask is not None:
+        if isinstance(mask, Path):
+            if not mask.exists():
+                raise FileNotFoundError(f"Mask file not found: {mask}")
+            mask = gu.Mask(mask)
+            mask.set_area_or_point("Point")
+        elif not isinstance(mask, gu.Mask):
+            raise ValueError("Mask must be a Path or geoutils.Mask object")
+        mask_warped = mask.reproject(reference)
+        diff_masked = diff[mask_warped]
+        logger.info("Applied mask to difference")
+    else:
+        diff_masked = diff
+        mask_warped = None
+
+    # Compute statistics
+    diff_stats = compute_raster_statistics(raster=diff, mask=mask_warped)
+
+    # Make plots
+    if not skip_plot:
+        # Define output path
+        if figure_path is not None:
+            figure_path = Path(figure_path)
+        else:
+            if output_dir is None:
+                output_dir = Path.cwd()
+            output_dir = Path(output_dir)
+            try:
+                output_stem = Path(dem.filename).stem
+            except (AttributeError, TypeError):
+                logger.warning("Unable to get DEM filename. Using default name")
+                output_stem = "stats"
+            figure_path = output_dir / f"{output_stem}_diff_plot.png"
+        figure_path.parent.mkdir(parents=True, exist_ok=True)
+
+        if plt_cfg is None:
+            plt_cfg = {}
+        plot_raster_statistics(
+            diff_masked,
+            diff_stats,
+            output_file=figure_path,
+            xlim=xlim,
+            **plt_cfg,
+        )
+        logger.debug(f"Saved plot: {figure_path}")
+
+    return diff_stats
 
 
 def compute_valid_pixel_in_polygon(
