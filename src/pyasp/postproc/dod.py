@@ -73,6 +73,7 @@ def compute_dod_stats(
     dem: xdem.DEM | Path | str,
     reference: xdem.DEM | Path | str,
     mask: gu.Mask | Path | None = None,
+    dod_path: Path | None = None,
     make_plot: bool = False,
     output_dir: Path | None = None,
     figure_path: Path | None = None,
@@ -121,7 +122,14 @@ def compute_dod_stats(
 
     # Compute the difference
     diff = compute_dod(dem, reference, warp_on=warp_on, resampling=resampling)
+    if diff is None:
+        raise ValueError("Error computing difference between DEMs")
     logger.info("Computed difference between DEMs")
+
+    if dod_path is not None:
+        dod_path = Path(dod_path)
+        diff.save(dod_path)
+        logger.info(f"Saved difference DEM to: {dod_path}")
 
     # Apply mask if provided
     if mask is not None:
@@ -163,7 +171,7 @@ def compute_dod_stats(
         if plt_cfg is None:
             plt_cfg = {}
         plot_raster_statistics(
-            diff_masked.data,
+            raster=diff_masked.data,
             output_file=figure_path,
             stats=diff_stats,
             xlim=xlim,
