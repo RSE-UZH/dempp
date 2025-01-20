@@ -71,15 +71,14 @@ def compute_dod_stats(
     dem: xdem.DEM | Path | str,
     reference: xdem.DEM | Path | str,
     mask: gu.Mask | Path | None = None,
-    dod_path: Path | None = None,
-    make_plot: bool = False,
     output_dir: Path | None = None,
     output_prefix: str | None = None,
+    make_plot: bool = False,
     xlim: tuple[float, float] | None = None,
     plt_cfg: dict | None = None,
     warp_on: str = "reference",
     resampling: str = "bilinear",
-) -> RasterStatistics:
+) -> tuple[xdem.DEM, RasterStatistics]:
     """Compute difference between two DEMs, calculate statistics and generate plots.
 
     Args:
@@ -94,7 +93,7 @@ def compute_dod_stats(
         plt_cfg (dict | None, optional): Configuration dictionary for plots. Defaults to None.
 
     Returns:
-        RasterStatistics: Object with computed statistics.
+        tuple[xdem.DEM, RasterStatistics]: The difference DEM and its statistics.
 
     Raises:
         ValueError: If input DEMs are not valid or compatible.
@@ -122,11 +121,22 @@ def compute_dod_stats(
         raise ValueError("Error computing difference between DEMs")
     logger.info("Computed difference between DEMs")
 
+    # Create the output directory and output stem
+    if output_dir is not None:
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        if output_prefix is None:
+            try:
+                output_prefix = Path(dem.filename).stem
+            except (AttributeError, TypeError):
+                logger.warning("Unable to get DEM filename. Using default name")
+                output_prefix = "stats"
+
     # Save difference DEM if path is provided
-    if dod_path is not None:
-        dod_path = Path(dod_path)
-        diff.save(dod_path)
-        logger.info(f"Saved difference DEM to: {dod_path}")
+    if output_dir is not None:
+        ddem_path = output_dir / f"{output_prefix}_ddem.tif"
+        diff.save(ddem_path)
+        logger.info(f"Saved difference DEM to: {ddem_path}")
 
     # Apply mask if provided
     if mask is not None:
@@ -148,46 +158,35 @@ def compute_dod_stats(
     diff_stats = compute_raster_statistics(raster=diff, mask=mask_warped)
     logger.info("Computed statistics for difference DEM")
 
-    # Define output directory and output stem
-    if output_dir is None:
-        output_dir = Path.cwd()
-    else:
-        output_dir = Path(output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    if output_prefix is None:
+    # Create outputs if requested
+    if output_dir is not None:
+        # Save statistics to file
         try:
-            output_prefix = Path(dem.filename).stem
-        except (AttributeError, TypeError):
-            logger.warning("Unable to get DEM filename. Using default name")
-            output_prefix = "stats"
-
-    # Save statistics to file
-    try:
-        stats_path = output_dir / f"{output_prefix}_stats.json"
-        diff_stats.save(stats_path)
-        logger.info(f"Saved statistics to: {stats_path}")
-    except Exception as e:
-        logger.error(f"Error saving statistics: {e}")
-
-    # Make plot and save if requested
-    if make_plot:
-        logger.info("Generating difference plot...")
-        figure_path = output_dir / f"{output_prefix}_plot.png"
-        if plt_cfg is None:
-            plt_cfg = {}
-        try:
-            plot_raster_statistics(
-                raster=diff_masked,
-                output_file=figure_path,
-                stats=diff_stats,
-                xlim=xlim,
-                **plt_cfg,
-            )
-            logger.info(f"Figure saved to: {figure_path}")
+            stats_path = output_dir / f"{output_prefix}_stats.json"
+            diff_stats.save(stats_path)
+            logger.info(f"Saved statistics to: {stats_path}")
         except Exception as e:
-            logger.error(f"Error saving figure: {e}")
+            logger.error(f"Error saving statistics: {e}")
 
-    return diff_stats
+        # Make difference histogram plot
+        if make_plot:
+            logger.info("Generating difference plot...")
+            figure_path = output_dir / f"{output_prefix}_plot.png"
+            if plt_cfg is None:
+                plt_cfg = {}
+            try:
+                plot_raster_statistics(
+                    raster=diff_masked,
+                    output_file=figure_path,
+                    stats=diff_stats,
+                    xlim=xlim,
+                    **plt_cfg,
+                )
+                logger.info(f"Figure saved to: {figure_path}")
+            except Exception as e:
+                logger.error(f"Error saving figure: {e}")
+
+    return diff, diff_stats
 
 
 if __name__ == "__main__":

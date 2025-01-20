@@ -245,15 +245,15 @@ def plot_raster_statistics(
 
 
 def save_stats_to_file(
-    stats: RasterStatistics,
-    output_file: Path,
+    stats: RasterStatistics | dict[str, Any],
+    output_file: Path | str,
     float_precision: int = 3,
 ) -> None:
     """Save statistics to a JSON file.
 
     Args:
-        stats (RasterStatistics): Statistics object to save
-        output_file (Path): Path to save the JSON file
+        stats (RasterStatistics | dict[str, Any]): Statistics object or dictionary to save.
+        output_file (Path | str): Path to save the output JSON file.
         float_precision (int, optional): Number of decimal places for float values. Defaults to 3.
     """
 
@@ -275,16 +275,17 @@ def save_stats_to_file(
                 formatted[key] = _format_value(value, float_precision)
         return formatted
 
+    # Convert to dict and format floats
+    if isinstance(stats, RasterStatistics):
+        stats = stats.to_dict()
+    formatted_stats = _format_dict_recursive(stats, float_precision)
+
+    # Save to JSON file
     output_file = Path(output_file)
     if output_file.suffix != ".json":
         output_file = output_file.with_suffix(".json")
     if not output_file.parent.exists():
         output_file.parent.mkdir(parents=True)
-
-    # Convert to dict and format floats
-    stats_dict = stats.to_dict()
-    formatted_stats = _format_dict_recursive(stats_dict, float_precision)
-
     with open(output_file, "w") as f:
         json.dump(formatted_stats, f, indent=4)
 
