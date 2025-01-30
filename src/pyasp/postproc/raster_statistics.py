@@ -314,6 +314,61 @@ def load_stats_from_file(input_file: Path) -> RasterStatistics:
 def compute_valid_pixel_in_polygon(
     raster: Path | str | gu.Raster,
     polygon: Path | str | gu.Vector,
+) -> tuple[int, float, float]:
+    """
+    Count valid pixels in a raster within a given polygon.
+
+    Args:
+        raster (Path | str | gu.Raster): Path to raster file or geoutils.Raster object.
+        polygon (Path | str | gu.Vector): Path to vector file or geoutils.Vector object.
+
+    Returns:
+        tuple[int, float, float]: Tuple containing:
+            - valid_pixels: Number of valid pixels in raster within polygon.
+            - valid_area_m2: Area of valid pixels in square meters.
+            - valid_area_perc: Percentage of valid pixels in the
+    """
+    if isinstance(raster, Path | str):
+        if not Path(raster).exists():
+            raise FileNotFoundError(f"Raster file not found: {raster}")
+        raster = gu.Raster(raster)
+    if isinstance(polygon, Path | str):
+        if not Path(polygon).exists():
+            raise FileNotFoundError(f"Polygon file not found: {polygon}")
+        polygon = gu.Vector(polygon)
+
+    if not isinstance(raster, gu.Raster):
+        raise TypeError("Invalid raster provided.")
+    if not isinstance(polygon, gu.Vector):
+        raise TypeError("Invalid polygon provided.")
+
+    # Reproject polygon to raster CRS
+    polygon = polygon.reproject(crs=raster.crs)
+
+    # Create binary mask from polygon
+    mask = polygon.create_mask(raster)
+
+    # Count valid (non-masked) pixels
+    valid_pixels = mask.data.sum()
+
+    # Convert in metric unit
+    try:
+        valid_area_m2 = valid_pixels * raster.res[0] * raster.res[1]
+
+        # Compute the percentage of valid pixels in the polygon
+        valid_area_perc = valid_area_m2 / polygon.area.sum()
+
+    except AttributeError:
+        logger.warning("Could not compute valid area")
+        valid_area_m2 = -1
+        valid_area_perc = -1
+
+    return valid_pixels, valid_area_m2, valid_area_perc
+
+
+def compute_glaciers_in_footprint(
+    raster: Path | str | gu.Raster,
+    polygon: Path | str | gu.Vector,
     satellite_footprint: Path | str | gu.Vector = None,
 ) -> tuple[int, float, float]:
     """Count number of valid pixels in raster within given polygon.
@@ -380,25 +435,8 @@ def compute_valid_pixel_in_polygon(
         logger.info("No satellite footprint provided. Using the raster extent.")
         polygon = polygon.crop(raster, clip=True)
 
-    # Create binary mask from polygon
-    mask = polygon.create_mask(raster)
-
-    # Apply mask to data
-    masked_data = raster[mask]
-
-    # Count valid pixels (non-nodata values)
-    valid_pixels = (~np.isnan(masked_data)).sum().astype(int)
-
-    # Convert in metric unit
-    try:
-        valid_area_m2 = valid_pixels * raster.res[0] * raster.res[1]
-
-        # Compute the percentage of valid pixels in the polygon
-        valid_area_perc = valid_area_m2 / polygon.area.sum()
-
-    except AttributeError:
-        logger.warning("Could not compute valid area")
-        valid_area_m2 = -1
-        valid_area_perc = -1
+    valid_pixels, valid_area_m2, valid_area_perc = compute_valid_pixel_in_polygon(
+        raster, polygon
+    )
 
     return valid_pixels, valid_area_m2, valid_area_perc
