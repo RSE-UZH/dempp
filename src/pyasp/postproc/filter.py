@@ -4,13 +4,18 @@ from pathlib import Path
 
 import geopandas as gpd
 import numpy as np
+import rasterio as rio
 import xdem
 from joblib import Parallel, delayed
 from rasterio.windows import Window
 from scipy.stats import zscore
 from tqdm import tqdm
 
-from .elevation_bands import extract_dem_window, extract_elevation_bands, vector_to_mask
+from pyasp.postproc.elevation_bands import (
+    extract_dem_window,
+    extract_elevation_bands,
+    vector_to_mask,
+)
 
 logger = logging.getLogger("pyasp")
 
@@ -142,65 +147,76 @@ def filter_by_elevation_bands(
     return outlier_mask
 
 
-def filter_glacier(
+def filter_dem(
     dem_path: Path | str,
-    geometry: gpd.GeoDataFrame | gpd.GeoSeries,
-    elevation_band_width: float,
+    geometry: gpd.GeoDataFrame | gpd.GeoSeries = None,
     filter_method: OutlierMethod | list[OutlierMethod] = OutlierMethod.ROBUST,
     n_limit: float = 3,
     use_elevation_bands: bool = True,
-    rgi_id: Path | str = None,  # Optional for logging
+    elevation_band_width: float = 100,
+    geometry_id: str = None,  # Optional for logging
 ) -> tuple[np.ndarray, Window]:
     """Process a single glacier and return its outlier mask.
 
     Args:
         dem_path (Path | str): Path to the DEM file.
-        geometry (gpd.GeoDataFrame | gpd.GeoSeries): Geometry of the glacier.
-        elevation_band_width (float): Width of elevation bands.
+        geometry (gpd.GeoDataFrame | gpd.GeoSeries): Vector geometry with the boundaries that will be used to filter the DEM within it.
         filter_method (OutlierMethod | List[OutlierMethod], optional): Outlier detection method. If a list is provided, the filters will be applied sequentially and the final mask will be the union of all masks. Defaults to OutlierMethod.ROBUST.
         n_limit (float, optional): Number of std/mad for outlier threshold. Defaults to 3.
         use_elevation_bands (bool, optional): Whether to use elevation bands for filtering. Defaults to True.
-        rgi_id (Path | str, optional): Optional RGI ID for logging. Defaults to None.
+        elevation_band_width (float): Width of elevation bands.
+        geometry_id (str, optional): Optional geometry_id for logging. Defaults to None.
 
     Returns:
         Tuple[np.ndarray, Window]: The outlier mask and the DEM window.
     """
 
-    if rgi_id is None:
-        rgi_id = geometry.index[0]
+    if geometry_id is None:
+        geometry_id = geometry.index[0]
 
-    logger.debug(f"Processing glacier {rgi_id}")
+    logger.debug(f"Processing glacier {geometry_id}")
 
-    # Extract DEM window for glacier
-    dem_window = extract_dem_window(dem_path, geometry)
+    if geometry is not None:
+        # Extract DEM window around the given geometry
+        dem_window = extract_dem_window(dem_path, geometry)
 
-    if dem_window is None:
-        logger.debug(f"Skipping glacier {rgi_id}: no valid DEM window")
-        return None, None
-    logger.debug(f"Extracted DEM window: {dem_window.window}")
+        if dem_window is None:
+            logger.debug(f"Skipping glacier {geometry_id}: no valid DEM window")
+            return None, None
+        logger.debug(f"Extracted DEM window: {dem_window.window}")
 
-    # Create glacier mask for window
-    glacier_mask = vector_to_mask(
-        geometry,
-        (dem_window.window.height, dem_window.window.width),
-        dem_window.transform,
-    )
-    logger.debug("Created glacier mask for window")
+        # Create glacier mask for window
+        mask = vector_to_mask(
+            geometry,
+            (dem_window.window.height, dem_window.window.width),
+            dem_window.transform,
+        )
+        logger.debug("Created glacier mask for window")
 
-    # Combine glacier mask with nodata mask
-    combined_mask = ~glacier_mask | dem_window.mask
+        # Combine glacier mask with nodata mask
+        combined_mask = ~mask | dem_window.mask
 
-    # Apply combined mask
-    masked_dem = np.ma.masked_array(dem_window.data, mask=combined_mask)
+        # Apply combined mask
+        masked_dem = np.ma.masked_array(dem_window.data, mask=combined_mask)
 
-    # Filter elevations
+    else:
+        # Load full DEM with rasterio
+        with rio.open(dem_path) as src:
+            masked_dem = src.read(1, masked=True)
+
+    # Check if the dem is completely masked
     if masked_dem.mask.all():
-        logger.debug(f"Glacier {rgi_id} is completely masked, returning empty mask")
+        logger.debug(
+            f"Glacier {geometry_id} is completely masked, returning empty mask"
+        )
         empty_mask = np.zeros_like(masked_dem.data, dtype=bool)
         return empty_mask, dem_window.window
 
-    logger.debug(f"Processing glacier {rgi_id} with {masked_dem.count()} valid pixels")
+    logger.debug(
+        f"Processing glacier {geometry_id} with {masked_dem.count()} valid pixels"
+    )
 
+    # Filter DEM based on elevation bands
     if use_elevation_bands:
         outlier_mask = filter_by_elevation_bands(
             dem=masked_dem,
@@ -209,36 +225,37 @@ def filter_glacier(
             n_limit=n_limit,
         )
     else:
+        # Filter the entire DEM
         outlier_mask = find_outliers(
             values=masked_dem,
             method=filter_method,
             n_limit=n_limit,
         )
-    logger.debug(f"Finished processing glacier {rgi_id}")
+    logger.debug(f"Finished processing glacier {geometry_id}")
 
     return outlier_mask, dem_window.window
 
 
-def filter_glaciers(
+def filter_glaciers_dem(
     dem_path: Path | str,
-    output_path: Path | str,
-    rgi_path: Path | str,
-    elevation_band_width: float = 50,
+    glacier_outline_path: Path | str,
     filter_method: OutlierMethod | list[OutlierMethod] = OutlierMethod.ROBUST,
     n_limit: float = 3,
     use_elevation_bands: bool = True,
+    elevation_band_width: float = 100,
+    output_path: Path | str = None,
     n_jobs: int = -1,
 ) -> xdem.DEM:
     """Process multiple glaciers and combine their outlier masks.
 
     Args:
         dem_path (Path | str): Path to DEM file.
-        output_path (Path | str): Path to save the output DEM file.
-        rgi_path (Path | str): Path to glacier outlines (GeoJSON).
+        glacier_outline_path (Path | str): Path to glacier outlines (GeoJSON).
         elevation_band_width (float, optional): Width of elevation bands. Defaults to 50.
         filter_method (OutlierMethod | List[OutlierMethod], optional): Outlier detection method. If a list is provided, the filters will be applied sequentially and the final mask will be the union of all masks. Defaults to OutlierMethod.ROBUST.
         n_limit (float, optional): Number of std/mad for outlier threshold. Defaults to 3.
         use_elevation_bands (bool, optional): Whether to use elevation bands for filtering. Defaults to True.
+        output_path (Path | str): Path to save the output DEM file. Defaults to None.
         n_jobs (int, optional): Number of parallel jobs (-1 for all cores, 1 to process sequentially). Defaults to -1.
 
     Returns:
@@ -247,21 +264,23 @@ def filter_glaciers(
     # Load input data
     logger.info("Loading DEM and RGI boundaries...")
     dem = xdem.DEM(dem_path)
-    rgi = gpd.read_file(rgi_path).to_crs(dem.crs)
+    glacier_outlines = gpd.read_file(glacier_outline_path).to_crs(dem.crs)
 
     # Process glaciers in parallel
     logger.info("Filtering DEM based on elevation bands for each glacier...")
     results = Parallel(n_jobs=n_jobs, prefer="threads")(
-        delayed(filter_glacier)(
+        delayed(filter_dem)(
             dem_path=dem_path,
-            geometry=gpd.GeoDataFrame(geometry=[row.geometry], crs=rgi.crs),
+            geometry=gpd.GeoDataFrame(
+                geometry=[row.geometry], crs=glacier_outlines.crs
+            ),
             elevation_band_width=elevation_band_width,
             filter_method=filter_method,
             n_limit=n_limit,
             use_elevation_bands=use_elevation_bands,
-            rgi_id=row["rgi_id"],
+            geometry_id=row["geometry_id"],
         )
-        for _, row in tqdm(rgi.iterrows())
+        for _, row in tqdm(glacier_outlines.iterrows())
     )
     logger.info("Finished processing all glaciers. Combining results...")
 
@@ -306,7 +325,7 @@ if __name__ == "__main__":
     dem_path = dem_dir / dem_name
     output_path = output_dir / f"dem_filtered_{elevation_band_width}_n{n_limit}.tif"
 
-    dem_filtered = filter_glaciers(
+    dem_filtered = filter_glaciers_dem(
         dem_path=dem_path,
         output_path=output_path,
         rgi_path=rgi_path,
