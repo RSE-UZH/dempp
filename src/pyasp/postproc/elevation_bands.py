@@ -7,14 +7,11 @@ from pathlib import Path
 import geopandas as gpd
 import numpy as np
 import rasterio as rio
-import rasterio.mask
-from joblib import Parallel, delayed
 from rasterio import features, warp
 from rasterio.crs import CRS
 from rasterio.windows import Window
 from scipy.interpolate import NearestNDInterpolator
 from scipy.ndimage import gaussian_filter, median_filter
-from scipy.stats import zscore
 
 logger = logging.getLogger("pyasp")
 
@@ -34,7 +31,7 @@ class DEMWindow:
     data: np.ndarray
     window: Window
     bounds: tuple[float, float, float, float]
-    transform: rasterio.Affine
+    transform: rio.Affine
     no_data: float = None
     mask: np.ndarray = None
     crs: CRS | str | int = None
@@ -44,7 +41,7 @@ class DEMWindow:
 
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
-        with rasterio.open(
+        with rio.open(
             path,
             "w",
             driver="GTiff",
@@ -98,7 +95,7 @@ def extract_dem_window(
     Returns:
         DEMWindow: The extracted DEM window and its metadata.
     """
-    with rasterio.open(dem_path, mode="r") as src:
+    with rio.open(dem_path, mode="r") as src:
         # Get raster bounds
         raster_bounds = src.bounds
 
@@ -151,7 +148,7 @@ def extract_dem_window(
             if src.nodata is not None
             else np.zeros_like(data, dtype=bool)
         )
-        bounds = rasterio.windows.bounds(window, src.transform)
+        bounds = rio.windows.bounds(window, src.transform)
         if src.crs is None:
             crs = None
         else:
@@ -262,25 +259,23 @@ def extract_elevation_bands(
 
     if smooth_dem:
         # Create smoothed array for extracting elevation bands
-        dem_smooth = dem_data.copy()
-        dem_smooth[mask] = np.nan
+        array = dem_data.copy()
+        array[mask] = np.nan
 
         # Apply median filter to remove outliers
-        filter_size = min(5, round(min(dem_smooth.shape) / 4))
-        dem_smooth = median_filter(dem_smooth, size=filter_size)
+        filter_size = min(5, round(min(array.shape) / 4))
+        array = median_filter(array, size=filter_size)
 
         # Smoot dem with a gaussian filter (temporary fill nans with nearest neighbor and exclude them after smoothing)
-        nan_mask = np.isnan(dem_smooth)
-        interpolator = NearestNDInterpolator(
-            np.argwhere(~nan_mask), dem_smooth[~nan_mask]
-        )
-        dem_smooth[nan_mask] = interpolator(np.argwhere(nan_mask))
-        dem_smooth = gaussian_filter(dem_smooth, sigma=filter_size)
-        dem_smooth[mask] = np.nan
+        nan_mask = np.isnan(array)
+        interpolator = NearestNDInterpolator(np.argwhere(~nan_mask), array[~nan_mask])
+        array[nan_mask] = interpolator(np.argwhere(nan_mask))
+        array = gaussian_filter(array, sigma=filter_size)
+        array[mask] = np.nan
 
-        # Write to file both the original dem and the smoothed dem for debugging
+        # For debug: write to file both the original dem and the smoothed dem
         # with tempfile.NamedTemporaryFile(suffix="demdata.tif", dir=".") as tmp:
-        #     with rasterio.open(
+        #     with rio.open(
         #         tmp.name,
         #         "w",
         #         driver="GTiff",
@@ -293,23 +288,22 @@ def extract_elevation_bands(
         #         nodata=-9999,
         #     ) as dst:
         #         dst.write(dem_data, 1)
-
         # with tempfile.NamedTemporaryFile(suffix="demdata_smoothed.tif", dir=".") as tmp:
-        #     with rasterio.open(
+        #     with rio.open(
         #         tmp.name,
         #         "w",
         #         driver="GTiff",
-        #         height=dem_smooth.shape[0],
-        #         width=dem_smooth.shape[1],
+        #         height=array.shape[0],
+        #         width=array.shape[1],
         #         count=1,
-        #         dtype=dem_smooth.dtype,
+        #         dtype=array.dtype,
         #         crs=CRS.from_epsg(32632),
         #         transform=rio.Affine(10, 0, 0, 0, -10, 0),
         #         nodata=np.nan,
         #     ) as dst:
-        #         dst.write(dem_smooth, 1)
+        #         dst.write(array, 1)
     else:
-        dem_smooth = dem_data
+        array = dem_data
 
     # Get robust min/max values for elevation bands and round to precision
     round_decimal = int(np.log10(band_width))
@@ -332,7 +326,7 @@ def extract_elevation_bands(
         label = f"{band_lower:.0f}-{band_upper:.0f}"
 
         # Create band mask (True where pixels should be masked)
-        band_mask = ~((dem_smooth >= band_lower) & (dem_smooth < band_upper)) | mask
+        band_mask = ~((array >= band_lower) & (array < band_upper)) | mask
 
         # Create masked array for band
         band_data = np.ma.masked_array(dem_data, mask=band_mask)
@@ -348,199 +342,3 @@ def extract_elevation_bands(
         )
 
     return elevation_bands
-
-
-def find_outliers(
-    values: np.ma.MaskedArray | np.ndarray,
-    method: OutlierMethod = OutlierMethod.ROBUST,
-    n_limit: float = 3,
-    mask: np.ndarray | None = None,
-) -> np.ndarray:
-    """Find outliers in array using specified method.
-
-    Args:
-        values (np.ma.MaskedArray | np.ndarray): Input array to check for outliers.
-        method (OutlierMethod, optional): Outlier detection method. Defaults to OutlierMethod.ROBUST.
-        n_limit (float, optional): Number of std/mad for outlier threshold. Defaults to 3.
-        mask (Optional[np.ndarray], optional): Optional boolean mask where True indicates invalid/masked values. Only used if values is not a MaskedArray. Masked pixels will not be included in outlier detection. Defaults to None.
-
-    Returns:
-        np.ndarray: Boolean array marking outliers (True = outlier). Masked pixels in the input array will not be considered as outliers and will be False in output.
-    """
-    # Handle input masking
-    if isinstance(values, np.ma.MaskedArray):
-        data = values.data
-        mask = values.mask
-    else:
-        data = values
-        if mask is None:
-            mask = np.isnan(data)
-
-    # Get valid values (not masked)
-    valid_values = data[~mask]
-
-    if len(valid_values) == 0:
-        return np.zeros_like(data, dtype=bool)  # No outliers if all masked
-
-    # Initialize outlier mask
-    outliers = np.zeros_like(data, dtype=bool)  # Start with no outliers
-
-    if method == OutlierMethod.ZSCORE:
-        band_z_scores = zscore(valid_values, nan_policy="omit")
-        outliers[~mask] = np.abs(band_z_scores) > n_limit
-
-    elif method == OutlierMethod.NORMAL:
-        mean = np.mean(valid_values)
-        std = np.std(valid_values)
-        outliers[~mask] = np.abs(data[~mask] - mean) > n_limit * std
-
-    elif method == OutlierMethod.ROBUST:
-        median = np.median(valid_values)
-        nmad = 1.4826 * np.median(np.abs(valid_values - median))
-        outliers[~mask] = np.abs(data[~mask] - median) > n_limit * nmad
-
-    else:
-        raise ValueError(f"Unknown outlier method: {method}")
-
-    return outliers
-
-
-def filter_by_elevation_bands(
-    dem: np.ndarray,
-    band_width: float,
-    method: OutlierMethod | list[OutlierMethod] = OutlierMethod.ROBUST,
-    n_limit: float = 3,
-    n_jobs: int = None,
-) -> np.ndarray:
-    """Filter DEM by elevation bands using numpy operations.
-
-    Args:
-        dem (np.ndarray): The DEM data.
-        band_width (float): The width of each elevation band.
-        method (OutlierMethod | List[OutlierMethod], optional): Outlier detection method. If a list is provided, the filters will be applied sequentially and the final mask will be the union of all masks. Defaults to OutlierMethod.ROBUST.
-        n_limit (float, optional): Number of std/mad for outlier threshold. Defaults to 3.
-        n_jobs (int, optional): Number of parallel jobs (-1 for all cores, 1 to process sequentially). Defaults to None.
-
-    Returns:
-        np.ndarray: Boolean array marking outliers.
-    """
-
-    def _process_single_band(band, method, n_limit):
-        """Process a single elevation band with multiple outlier detection methods."""
-        outlier_mask = np.zeros_like(band.data.data, dtype=bool)
-        for m in method:
-            band_outliers = find_outliers(band.data, method=m, n_limit=n_limit)
-            outlier_mask |= band_outliers
-        return outlier_mask
-
-    if not isinstance(method, list):
-        method = [method]
-    method = [m if isinstance(m, OutlierMethod) else OutlierMethod(m) for m in method]
-
-    # Get base mask
-    if np.ma.is_masked(dem):
-        base_mask = dem.mask
-        dem_data = dem.data
-    else:
-        base_mask = np.isnan(dem)
-        dem_data = dem
-
-    # Extract elevation bands
-    elevation_bands = extract_elevation_bands(dem, band_width, base_mask)
-
-    # Decide if to use parallel processing or not depending on the number of bands and the number of filtering methods. If this number is high, use parallel processing, otherwise process the bands sequentially.
-    if len(elevation_bands) * len(method) > 20:
-        n_jobs = n_jobs if n_jobs is not None else -1
-
-    # Process all the bands
-    results = Parallel(n_jobs=n_jobs, prefer="threads")(
-        delayed(_process_single_band)(band=band, method=method, n_limit=n_limit)
-        for band in elevation_bands
-    )
-
-    # Combine the outlier masks derived from each band
-    outlier_mask = np.zeros_like(dem_data, dtype=bool)
-    for band_mask in results:
-        outlier_mask |= band_mask
-
-    # Make sure to exclude masked values from outlier mask
-    outlier_mask[base_mask] = False
-
-    return outlier_mask
-
-
-def filter_glacier(
-    dem_path: Path | str,
-    geometry: gpd.GeoDataFrame | gpd.GeoSeries,
-    elevation_band_width: float,
-    filter_method: OutlierMethod | list[OutlierMethod] = OutlierMethod.ROBUST,
-    n_limit: float = 3,
-    use_elevation_bands: bool = True,
-    rgi_id: Path | str = None,  # Optional for logging
-) -> tuple[np.ndarray, Window]:
-    """Process a single glacier and return its outlier mask.
-
-    Args:
-        dem_path (Path | str): Path to the DEM file.
-        geometry (gpd.GeoDataFrame | gpd.GeoSeries): Geometry of the glacier.
-        elevation_band_width (float): Width of elevation bands.
-        filter_method (OutlierMethod | List[OutlierMethod], optional): Outlier detection method. If a list is provided, the filters will be applied sequentially and the final mask will be the union of all masks. Defaults to OutlierMethod.ROBUST.
-        n_limit (float, optional): Number of std/mad for outlier threshold. Defaults to 3.
-        use_elevation_bands (bool, optional): Whether to use elevation bands for filtering. Defaults to True.
-        rgi_id (Path | str, optional): Optional RGI ID for logging. Defaults to None.
-
-    Returns:
-        Tuple[np.ndarray, Window]: The outlier mask and the DEM window.
-    """
-
-    if rgi_id is None:
-        rgi_id = geometry.index[0]
-
-    logger.debug(f"Processing glacier {rgi_id}")
-
-    # Extract DEM window for glacier
-    dem_window = extract_dem_window(dem_path, geometry)
-
-    if dem_window is None:
-        logger.debug(f"Skipping glacier {rgi_id}: no valid DEM window")
-        return None, None
-    logger.debug(f"Extracted DEM window: {dem_window.window}")
-
-    # Create glacier mask for window
-    glacier_mask = vector_to_mask(
-        geometry,
-        (dem_window.window.height, dem_window.window.width),
-        dem_window.transform,
-    )
-    logger.debug("Created glacier mask for window")
-
-    # Combine glacier mask with nodata mask
-    combined_mask = ~glacier_mask | dem_window.mask
-
-    # Apply combined mask
-    masked_dem = np.ma.masked_array(dem_window.data, mask=combined_mask)
-
-    # Filter elevations
-    if masked_dem.mask.all():
-        logger.debug(f"Glacier {rgi_id} is completely masked, returning empty mask")
-        empty_mask = np.zeros_like(masked_dem.data, dtype=bool)
-        return empty_mask, dem_window.window
-
-    logger.debug(f"Processing glacier {rgi_id} with {masked_dem.count()} valid pixels")
-
-    if use_elevation_bands:
-        outlier_mask = filter_by_elevation_bands(
-            dem=masked_dem,
-            band_width=elevation_band_width,
-            method=filter_method,
-            n_limit=n_limit,
-        )
-    else:
-        outlier_mask = find_outliers(
-            values=masked_dem,
-            method=filter_method,
-            n_limit=n_limit,
-        )
-    logger.debug(f"Finished processing glacier {rgi_id}")
-
-    return outlier_mask, dem_window.window
