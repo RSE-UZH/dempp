@@ -12,6 +12,7 @@ from rasterio.crs import CRS
 from rasterio.windows import Window
 from scipy.interpolate import NearestNDInterpolator
 from scipy.ndimage import gaussian_filter, median_filter
+from shapely.geometry import Polygon
 
 logger = logging.getLogger("pyasp")
 
@@ -24,7 +25,7 @@ class OutlierMethod(Enum):
     ROBUST = "robust"  # median/nmad
 
 
-@dataclass
+@dataclass(kw_only=True)
 class DEMWindow:
     """Class to store DEM window and its metadata"""
 
@@ -83,13 +84,13 @@ def round_to_decimal(
 
 
 def extract_dem_window(
-    dem_path: str, geom: gpd.GeoDataFrame, padding: int = 1
+    dem_path: str, geom: gpd.GeoDataFrame | Polygon, padding: int = 1
 ) -> DEMWindow:
     """Extract a window from DEM based on geometry bounds with padding.
 
     Args:
         dem_path (str): Path to the DEM file.
-        geom (gpd.GeoDataFrame): Geometry to extract the window for.
+        geom (gpd.GeoDataFrame | Polygon): Geometry to extract window for. if GeoDataFrame, uses first geometry.
         padding (int, optional): Padding to add around the geometry bounds. Defaults to 1.
 
     Returns:
@@ -99,8 +100,13 @@ def extract_dem_window(
         # Get raster bounds
         raster_bounds = src.bounds
 
-        # Get geometry bounds
-        geom_bounds = geom.bounds.values[0]
+        # Get geometry bounds based on input type
+        if isinstance(geom, gpd.GeoDataFrame):
+            geom_bounds = geom.bounds.values[0]
+            geom_id = f"ID: {geom.index[0]}"
+        else:  # Polygon
+            geom_bounds = geom.bounds
+            geom_id = "Polygon"
         minx, miny, maxx, maxy = geom_bounds
 
         # Check intersection
@@ -110,9 +116,7 @@ def extract_dem_window(
             and miny < raster_bounds.top
             and maxy > raster_bounds.bottom
         ):
-            logger.debug(
-                f"Geometry (ID: {geom.index[0]}) does not overlap with raster bounds"
-            )
+            logger.debug(f"Geometry ({geom_id}) does not overlap with raster bounds")
             return None
 
         try:
@@ -120,9 +124,7 @@ def extract_dem_window(
             row_start, col_start = src.index(minx, maxy)
             row_stop, col_stop = src.index(maxx, miny)
         except IndexError:
-            logger.debug(
-                f"Geometry (ID: {geom.index[0]}) coordinates outside raster bounds"
-            )
+            logger.debug(f"Geometry ({geom_id}) coordinates outside raster bounds")
             return None
 
         # Add padding
@@ -132,12 +134,10 @@ def extract_dem_window(
         col_stop = min(src.width, col_stop + padding)
 
         if row_stop <= row_start or col_stop <= col_start:
-            logger.debug(
-                f"Invalid window dimensions for geometry (ID: {geom.index[0]})"
-            )
+            logger.debug(f"Invalid window dimensions for geometry ({geom_id})")
             return None
 
-        # Create valid window
+        # Rest of the function remains the same
         window = Window(
             col_start, row_start, col_stop - col_start, row_stop - row_start
         )
@@ -154,11 +154,19 @@ def extract_dem_window(
         else:
             crs = src.crs if isinstance(src.crs, CRS) else CRS.from_string(src.crs)
 
-    return DEMWindow(data, window, bounds, transform, src.nodata, mask, crs)
+    return DEMWindow(
+        data=data,
+        window=window,
+        bounds=bounds,
+        transform=transform,
+        no_data=src.nodata,
+        mask=mask,
+        crs=crs,
+    )
 
 
 def vector_to_mask(
-    geometry: gpd.GeoDataFrame | gpd.GeoSeries,
+    geometry: gpd.GeoDataFrame | Polygon,
     window_shape: tuple[int, int],
     transform: rio.Affine,
     crs: CRS | None = None,
@@ -168,26 +176,30 @@ def vector_to_mask(
     """Creates a rasterized boolean mask for vector geometries.
 
     Converts vector geometry to a raster mask using the provided spatial
-    reference system and transform. Optionally applies a buffer to the geometries and crops to specified bounds.
+    reference system and transform. Optionally applies a buffer to the geometries
+    and crops to specified bounds.
 
     Args:
-        geometry (gpd.GeoDataFrame | gpd.GeoSeries): Vector data.
-        window_shape (tuple[int, int]): Output raster dimensions as (height, width).
-        transform (rio.Affine): Affine transform defining the raster's spatial reference.
-        crs (CRS | None, optional): Coordinate reference system for output raster. If None, uses geometry's CRS.
-        buffer (int | float, optional): Distance to buffer geometries. Zero means no buffer. Defaults to 0.
-        bounds (tuple[float, float, float, float] | None, optional): Spatial bounds as (left, bottom, right, top). If None, uses geometry bounds.
+        geometry: Vector data as either GeoDataFrame or Shapely Polygon.
+        window_shape: Output raster dimensions as (height, width).
+        transform: Affine transform defining the raster's spatial reference.
+        crs: Coordinate reference system for output raster. If None, uses geometry's CRS.
+            Required when input is a Polygon.
+        buffer: Distance to buffer geometries. Zero means no buffer. Defaults to 0.
+        bounds: Spatial bounds as (left, bottom, right, top). If None, uses geometry bounds.
 
     Returns:
-        np.ndarray: Boolean mask where True indicates the geometry.
+        Boolean mask where True indicates the geometry.
 
     Raises:
         TypeError: If buffer is not a number.
-        ValueError: If geometry is empty or invalid.
+        ValueError: If geometry is empty or invalid, or if CRS is None for Polygon input.
     """
-    # Convert GeoSeries to GeoDataFrame if needed
-    if isinstance(geometry, gpd.GeoSeries):
-        geometry = gpd.GeoDataFrame(geometry=geometry)
+    # Convert Polygon to GeoDataFrame if needed
+    if not isinstance(geometry, gpd.GeoDataFrame):
+        if crs is None:
+            raise ValueError("CRS must be provided when input is a Polygon")
+        geometry = gpd.GeoDataFrame(geometry=[geometry], crs=crs)
 
     # Make copy to avoid modifying input
     gdf = geometry.copy()
