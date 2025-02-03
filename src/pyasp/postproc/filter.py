@@ -337,7 +337,7 @@ def filter_dem_by_glacier(
     elevation_band_width: float = 100,
     n_jobs: int = -1,
 ) -> tuple[xdem.DEM, np.ndarray]:
-    """Process multiple glaciers and combine their outlier maskwarnings.
+    """Process multiple glaciers and combine their outlier masks.
 
     Args:
         dem_path (Path | str): Path to DEM file.
