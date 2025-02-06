@@ -1,5 +1,4 @@
 import logging
-from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -13,19 +12,9 @@ from scipy.interpolate import NearestNDInterpolator
 from scipy.ndimage import gaussian_filter, median_filter
 from shapely.geometry import Polygon
 
+from dempp.math import compute_nmad, round_to_decimal
+
 logger = logging.getLogger("dempp")
-
-
-def compute_nmad(data: np.ndarray) -> float:
-    """Calculate the normalized median absolute deviation (NMAD) of the data.
-
-    Args:
-        data (np.ndarray): Input data.
-
-    Returns:
-        float: NMAD of the data.
-    """
-    return 1.4826 * np.median(np.abs(data - np.median(data)))
 
 
 @dataclass(kw_only=True)
@@ -128,11 +117,6 @@ class ElevationBand:
             """
         logger.info(info_str)
 
-    def get_stats(self):
-        if not self.has_data:
-            raise ValueError("Data not loaded. Load data using load_masked_data()")
-        return self.stats
-
     def load_masked_data(
         self,
         data: np.ndarray,
@@ -146,22 +130,115 @@ class ElevationBand:
         return self.__dict__
 
 
-def round_to_decimal(
-    x: float, decimal: int = 0, func: Callable = np.round, **kwargs
-) -> float:
-    """Round a number to a specified number of decimal places.
+class ElevationBands:
+    def __init__(self):
+        self.bands = []
+        self.crs = None
+        self.affine = None
+        self.path = None
 
-    Args:
-        x (float): The number to round.
-        decimal (int, optional): The number of decimal places to round to. Defaults to 0.
-        func (Callable, optional): The rounding function to use. Defaults to np.round.
-        **kwargs: Additional arguments to pass to the rounding function.
+    def __getitem__(self, key):
+        return self.bands[key]
 
-    Returns:
-        float: The rounded number.
-    """
-    multiplier = 10.0**decimal
-    return func(x / multiplier, **kwargs) * multiplier
+    def __len__(self):
+        return len(self.bands)
+
+    def __iter__(self):
+        return iter(self.bands)
+
+    def __repr__(self):
+        return f"ElevationBands({len(self.bands)} bands)"
+
+    def __str__(self):
+        return f"ElevationBands({len(self.bands)} bands)"
+
+    def create_from_geotiff(
+        self, geotiff_path: str, band_width: float, smooth_dem: bool = True
+    ):
+        geotiff_path = Path(geotiff_path)
+        if not geotiff_path.exists():
+            raise FileNotFoundError(f"File not found: {geotiff_path}")
+        self.path = geotiff_path
+
+        with rio.open(self.path) as src:
+            self.crs = src.crs
+            self.affine = src.transform
+            dem_data = src.read(1, masked=True)
+            self.bands = extract_elevation_bands(
+                dem_data, band_width, smooth_dem=smooth_dem
+            )
+
+    def to_file(
+        self,
+        categorical_path: Path,
+        stats_output_path: Path = None,
+        nodata_cat: int = -1,
+        nodata_stats: float = -9999.0,
+    ):
+        """Export elevation bands as a categorical GeoTIFF and optionally as an additional multiband raster with band center, mean, and std.
+
+        Args:
+            categorical_path (Path): Output path for the categorical raster.
+            stats_output_path (Path, optional): Output path for the multiband stats raster. Defaults to None.
+            nodata_cat (int, optional): NoData value for categorical raster. Defaults to -1.
+            nodata_stats (float, optional): NoData value for stats raster. Defaults to -9999.0.
+        """
+        if not self.bands:
+            raise ValueError("No elevation bands available for export")
+        # Assume DEM shape is the same for all bands
+        dem_shape = self.bands[0].data.shape
+        # Initialize output arrays
+        cat_array = np.full(dem_shape, nodata_cat, dtype=np.int32)
+        if stats_output_path:
+            center_array = np.full(dem_shape, nodata_stats, dtype=np.float32)
+            mean_array = np.full(dem_shape, nodata_stats, dtype=np.float32)
+            std_array = np.full(dem_shape, nodata_stats, dtype=np.float32)
+        # For each band, set pixels that fall into the band
+        for idx, band in enumerate(self.bands):
+            # Condition: pixels with value within [lower, upper) and not masked
+            condition = np.logical_and(
+                band.data >= band.lower, band.data < band.upper
+            ) & (~band.mask)
+            cat_array[condition] = idx
+            if stats_output_path:
+                center_array[condition] = band.center
+                mean_array[condition] = band.stats.get("mean", np.nan)
+                std_array[condition] = band.stats.get("std", np.nan)
+        # Write categorical GeoTIFF
+        import rasterio
+
+        new_meta = {
+            "driver": "GTiff",
+            "height": dem_shape[0],
+            "width": dem_shape[1],
+            "count": 1,
+            "dtype": cat_array.dtype,
+            "crs": self.crs,
+            "transform": self.affine,
+            "nodata": nodata_cat,
+        }
+        categorical_path = Path(categorical_path)
+        categorical_path.parent.mkdir(parents=True, exist_ok=True)
+        with rasterio.open(categorical_path, "w", **new_meta) as dst:
+            dst.write(cat_array, 1)
+        # Write additional stats if output path provided
+        if stats_output_path:
+            stats_output_path = Path(stats_output_path)
+            stats_output_path.parent.mkdir(parents=True, exist_ok=True)
+            stats_meta = {
+                "driver": "GTiff",
+                "height": dem_shape[0],
+                "width": dem_shape[1],
+                "count": 3,
+                "dtype": center_array.dtype,
+                "crs": self.crs,
+                "transform": self.affine,
+                "nodata": nodata_stats,
+            }
+            with rasterio.open(stats_output_path, "w", **stats_meta) as dst:
+                dst.write(center_array, 1)
+                dst.write(mean_array, 2)
+                dst.write(std_array, 3)
 
 
 def extract_dem_window(
@@ -404,3 +481,16 @@ def extract_elevation_bands(
         )
 
     return elevation_bands
+
+
+if __name__ == "__main__":
+    data_path = Path("/home/fioli/rse_aletsch/SPOT5_aletsch/pyasp_new/el_bands_sandbox")
+    dem_path = data_path / "004_005-006_S5_054-256-0_2003-07-08.tif"
+
+    dem_path.exists()
+
+    eb = ElevationBands()
+    eb.create_from_geotiff(dem_path, 100)
+    print(eb)
+
+    eb.to_file()
