@@ -3,8 +3,8 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "pyasp"
-version = "0.0.4"
+name = "dempp"
+version = "0.0.1"
 description = "Python package for Ames Stereo Pipeline processing"
 readme = "README.md"
 authors = [{ name = "Francesco Ioli", email = "francesco.ioli@geo.uzh.ch" }]
@@ -24,7 +24,6 @@ dependencies = [
     "matplotlib",
     "pandas",
     "opencv-python",
-    #"opencv-contrib-python",
     "rasterio",
     "pyproj",
     "tqdm",
@@ -41,9 +40,9 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/RSE-UZH/pyasp"
-Documentation = "https://github.com/RSE-UZH/pyasp/"
-Repository = "https://github.com/RSE-UZH/pyasp"
+Homepage = "https://github.com/RSE-UZH/dempp"
+Documentation = "https://github.com/RSE-UZH/dempp/"
+Repository = "https://github.com/RSE-UZH/dempp"
 
 [project.optional-dependencies]
 asp-plot = ["fiona", "matplotlib-scalebar", "contextily", "markdown-pdf"]
@@ -60,10 +59,9 @@ dev = [
     "pre-commit",
     "icecream",
 ]
-all = ["pyasp[asp-plot,dev]"]
 
 [tool.hatch]
-version.path = "src/pyasp/__init__.py"
+version.path = "src/dempp/__init__.py"
 
 [tool.pytest.ini_options]
 minversion = "7.0"
@@ -75,7 +73,7 @@ testpaths = ["tests"]
 
 
 [tool.bumpver]
-current_version = "0.0.4"
+current_version = "0.0.1"
 version_pattern = "MAJOR.MINOR.PATCH"
 commit_message = "bump version {old_version} -> {new_version}"
 commit = true
@@ -84,4 +82,4 @@ push = false
 
 [tool.bumpver.file_patterns]
 "pyproject.toml" = ['current_version = "{version}"', 'version = "{version}"']
-"src/pyasp/__init__.py" = ["{version}"]
+"src/dempp/__init__.py" = ["{version}"]

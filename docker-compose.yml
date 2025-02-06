@@ -1,8 +1,8 @@
 services:
-  pyasp:
+  dempp:
     build:
       context: .
-    container_name: run-pyasp  
+    container_name: run-dempp  
     volumes:
       - ./demo:/workspace/demo
       - ./data:/workspace/data

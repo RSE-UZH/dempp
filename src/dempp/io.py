@@ -7,7 +7,7 @@ import numpy as np
 import xdem
 from tqdm import tqdm
 
-logger = logging.getLogger("pyasp")
+logger = logging.getLogger("dempp")
 
 
 def load_dem(

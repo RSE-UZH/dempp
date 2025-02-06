@@ -12,7 +12,7 @@ import numpy as np
 import seaborn as sns
 import xdem
 
-logger = logging.getLogger("pyasp")
+logger = logging.getLogger("dempp")
 
 
 @dataclass()

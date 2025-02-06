@@ -1,6 +1,6 @@
 site_name: My Docs
 site_url: http://127.0.0.1:8000
-repo_url: https://github.com/RSE-UZH/pyasp
+repo_url: https://github.com/RSE-UZH/dempp
 site_author: RSE-UZH
 
 theme:

@@ -4,13 +4,13 @@ from pathlib import Path
 import geoutils as gu
 import xdem
 
-from pyasp.postproc.raster_statistics import (
+from dempp.raster_statistics import (
     RasterStatistics,
     compute_raster_statistics,
     plot_raster_statistics,
 )
 
-logger = logging.getLogger("pyasp")
+logger = logging.getLogger("dempp")
 
 
 def compute_dod(

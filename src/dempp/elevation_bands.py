@@ -13,7 +13,7 @@ from scipy.interpolate import NearestNDInterpolator
 from scipy.ndimage import gaussian_filter, median_filter
 from shapely.geometry import Polygon
 
-logger = logging.getLogger("pyasp")
+logger = logging.getLogger("dempp")
 
 
 def compute_nmad(data: np.ndarray) -> float:

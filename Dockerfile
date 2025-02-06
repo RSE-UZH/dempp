@@ -20,15 +20,15 @@ WORKDIR /workspace
 
 # Clone private repo
 RUN mkdir -p -m 0600 ~/.ssh && ssh-keyscan github.com >> ~/.ssh/known_hosts
-RUN --mount=type=ssh git clone git@github.com:RSE-UZH/pyasp.git && \
-    cd pyasp && \
+RUN --mount=type=ssh git clone git@github.com:RSE-UZH/dempp.git && \
+    cd dempp && \
     python3 -m pip install --upgrade pip && \
     pip3 install setuptools && \
     pip3 install -e . && \  
     pip3 install pytest pytest-mock
 
 # Run tests
-# RUN cd pyasp && pytest
+# RUN cd dempp && pytest
 
 # Set entrypoint
 ENTRYPOINT ["/bin/bash"]

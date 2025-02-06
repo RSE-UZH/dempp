@@ -15,14 +15,14 @@ from shapely.geometry import Polygon
 from tqdm import tqdm
 from tqdm.contrib.logging import logging_redirect_tqdm
 
-from pyasp.postproc.elevation_bands import (
+from dempp.elevation_bands import (
     ElevationBand,
     extract_dem_window,
     extract_elevation_bands,
     vector_to_mask,
 )
 
-logger = logging.getLogger("pyasp")
+logger = logging.getLogger("dempp")
 
 
 def compute_nmad(data: np.ndarray) -> float:
