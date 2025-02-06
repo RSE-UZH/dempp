@@ -21,20 +21,9 @@ from dempp.elevation_bands import (
     extract_elevation_bands,
     vector_to_mask,
 )
+from dempp.math import compute_nmad
 
 logger = logging.getLogger("dempp")
-
-
-def compute_nmad(data: np.ndarray) -> float:
-    """Calculate the normalized median absolute deviation (NMAD) of the data.
-
-    Args:
-        data (np.ndarray): Input data.
-
-    Returns:
-        float: NMAD of the data.
-    """
-    return 1.4826 * np.median(np.abs(data - np.median(data)))
 
 
 class OutlierMethod(Enum):

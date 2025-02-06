@@ -3,7 +3,7 @@ from collections.abc import Callable
 
 import numpy as np
 
-logger = logging.getLogger("pyasp")
+logger = logging.getLogger("dempp")
 
 
 """Math and statistics utilities."""

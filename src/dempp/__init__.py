@@ -46,10 +46,5 @@ def setup_logger(
 
 
 # Setup logger and timer for the package
-logger = setup_logger(
-    level=logging.INFO,
-    name="pyasp",
-    log_to_file=True,
-    log_folder="./.logs",
-)
+logger = setup_logger(level=logging.INFO, name="dempp")
 timer = utils.Timer(logger=logger)
