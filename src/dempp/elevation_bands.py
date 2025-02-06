@@ -1,5 +1,5 @@
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 import geopandas as gpd
@@ -8,11 +8,10 @@ import rasterio as rio
 from rasterio import features, warp
 from rasterio.crs import CRS
 from rasterio.windows import Window
-from scipy.interpolate import NearestNDInterpolator
-from scipy.ndimage import gaussian_filter, median_filter
+from scipy.ndimage import distance_transform_edt, gaussian_filter, median_filter
 from shapely.geometry import Polygon
 
-from dempp.math import compute_nmad, round_to_decimal
+from dempp.math import round_to_decimal
 
 logger = logging.getLogger("dempp")
 
@@ -50,22 +49,14 @@ class DEMWindow:
 
 
 @dataclass(kw_only=True)
-class ElevationBand:
-    mask: np.ndarray = field(repr=False)
-    data: np.ndarray = field(default=None, repr=False)
+class BandLimits:
     lower: float = None
     upper: float = None
     center: float = None
     width: float = None
     label: str = None
-    has_data: bool = False
-    stats: dict = field(default_factory=dict, repr=False)
 
     def __post_init__(self):
-        if self.data is not None:
-            self.has_data = True
-            self.compute_statistics()
-
         if self.lower is not None and self.upper is not None:
             self.center = (self.lower + self.upper) / 2
             self.width = self.upper - self.lower
@@ -78,56 +69,6 @@ class ElevationBand:
             )
         if self.label is None:
             self.label = f"{self.band_lower:.0f}-{self.band_upper:.0f}"
-
-    @property
-    def masked_data(self):
-        if self.data is None:
-            raise ValueError("Data not set. Load masked data using load_masked_data()")
-        return self.load_masked_data(self.data)
-
-    def get_data(self):
-        if self.data is None:
-            raise ValueError("Data not set. Load masked data using load_masked_data()")
-        return self.data
-
-    def compute_statistics(self):
-        if not self.has_data:
-            raise ValueError("Data not loaded. Load data using load_masked_data()")
-        ma_data = self.masked_data.compressed()
-        self.stats = {
-            "mean": np.mean(ma_data),
-            "median": np.median(ma_data),
-            "std": np.std(ma_data),
-            "nmad": compute_nmad(ma_data),
-            "pixel": ma_data.size,
-        }
-
-    def info(self, stats: bool = True):
-        info_str = f"""Elevation band: {self.label}\n
-            - Center: {self.center:.0f} m\n  
-            - Width: {self.width:.0f} m\n 
-        """
-        if stats:
-            info_str += f"""Statistics:\n
-                - Mean: {self.stats["mean"]:.2f}\n
-                - Median: {self.stats["median"]:.2f}\n
-                - Std: {self.stats["std"]:.2f}\n
-                - NMAD: {self.stats["nmad"]:.2f}\n
-                - Valid pixels: {self.stats["pixel"]}\n
-            """
-        logger.info(info_str)
-
-    def load_masked_data(
-        self,
-        data: np.ndarray,
-    ) -> np.ma.MaskedArray:
-        if self.mask is None:
-            raise ValueError("Mask not set. Unable to load data without mask")
-        return np.ma.masked_array(data, mask=self.mask)
-
-    def to_dict(self):
-        """Convert elevation band to dictionary"""
-        return self.__dict__
 
 
 class ElevationBands:
@@ -153,7 +94,11 @@ class ElevationBands:
         return f"ElevationBands({len(self.bands)} bands)"
 
     def create_from_geotiff(
-        self, geotiff_path: str, band_width: float, smooth_dem: bool = True
+        self,
+        geotiff_path: str,
+        band_width: float,
+        polygon: gpd.GeoDataFrame | Polygon = None,
+        smooth_dem: bool = True,
     ):
         geotiff_path = Path(geotiff_path)
         if not geotiff_path.exists():
@@ -185,60 +130,63 @@ class ElevationBands:
         """
         if not self.bands:
             raise ValueError("No elevation bands available for export")
-        # Assume DEM shape is the same for all bands
-        dem_shape = self.bands[0].data.shape
-        # Initialize output arrays
-        cat_array = np.full(dem_shape, nodata_cat, dtype=np.int32)
-        if stats_output_path:
-            center_array = np.full(dem_shape, nodata_stats, dtype=np.float32)
-            mean_array = np.full(dem_shape, nodata_stats, dtype=np.float32)
-            std_array = np.full(dem_shape, nodata_stats, dtype=np.float32)
-        # For each band, set pixels that fall into the band
-        for idx, band in enumerate(self.bands):
-            # Condition: pixels with value within [lower, upper) and not masked
-            condition = np.logical_and(
-                band.data >= band.lower, band.data < band.upper
-            ) & (~band.mask)
-            cat_array[condition] = idx
-            if stats_output_path:
-                center_array[condition] = band.center
-                mean_array[condition] = band.stats.get("mean", np.nan)
-                std_array[condition] = band.stats.get("std", np.nan)
-        # Write categorical GeoTIFF
-        import rasterio
 
-        new_meta = {
-            "driver": "GTiff",
-            "height": dem_shape[0],
-            "width": dem_shape[1],
-            "count": 1,
-            "dtype": cat_array.dtype,
-            "crs": self.crs,
-            "transform": self.affine,
-            "nodata": nodata_cat,
-        }
-        categorical_path = Path(categorical_path)
-        categorical_path.parent.mkdir(parents=True, exist_ok=True)
-        with rasterio.open(categorical_path, "w", **new_meta) as dst:
-            dst.write(cat_array, 1)
-        # Write additional stats if output path provided
-        if stats_output_path:
-            stats_output_path = Path(stats_output_path)
-            stats_output_path.parent.mkdir(parents=True, exist_ok=True)
-            stats_meta = {
+        # Read Dem shape with rasterio
+        with rio.open(self.path) as src:
+            dem_shape = src.shape
+            dem_data = src.read(1)
+
+            # Initialize output arrays
+            cat_array = np.full(dem_shape, nodata_cat, dtype=np.int32)
+            if stats_output_path:
+                center_array = np.full(dem_shape, nodata_stats, dtype=np.float32)
+                mean_array = np.full(dem_shape, nodata_stats, dtype=np.float32)
+                std_array = np.full(dem_shape, nodata_stats, dtype=np.float32)
+            # For each band, set pixels that fall into the band
+            for idx, band in enumerate(self.bands):
+                # Condition: pixels with value within [lower, upper) and not masked
+                condition = np.logical_and(
+                    dem_data >= band.lower, dem_data < band.upper
+                ) & (~band.mask)
+                cat_array[condition] = idx
+                if stats_output_path:
+                    center_array[condition] = band.center
+                    mean_array[condition] = band.stats.get("mean", np.nan)
+                    std_array[condition] = band.stats.get("std", np.nan)
+
+            new_meta = {
                 "driver": "GTiff",
                 "height": dem_shape[0],
                 "width": dem_shape[1],
-                "count": 3,
-                "dtype": center_array.dtype,
+                "count": 1,
+                "dtype": cat_array.dtype,
                 "crs": self.crs,
                 "transform": self.affine,
-                "nodata": nodata_stats,
+                "nodata": nodata_cat,
             }
-            with rasterio.open(stats_output_path, "w", **stats_meta) as dst:
-                dst.write(center_array, 1)
-                dst.write(mean_array, 2)
-                dst.write(std_array, 3)
+            categorical_path = Path(categorical_path)
+            categorical_path.parent.mkdir(parents=True, exist_ok=True)
+            with rio.open(categorical_path, "w", **new_meta) as dst:
+                dst.write(cat_array, 1)
+
+            # Write additional stats if output path provided
+            if stats_output_path:
+                stats_output_path = Path(stats_output_path)
+                stats_output_path.parent.mkdir(parents=True, exist_ok=True)
+                stats_meta = {
+                    "driver": "GTiff",
+                    "height": dem_shape[0],
+                    "width": dem_shape[1],
+                    "count": 3,
+                    "dtype": center_array.dtype,
+                    "crs": self.crs,
+                    "transform": self.affine,
+                    "nodata": nodata_stats,
+                }
+                with rio.open(stats_output_path, "w", **stats_meta) as dst:
+                    dst.write(center_array, 1)
+                    dst.write(mean_array, 2)
+                    dst.write(std_array, 3)
 
 
 def extract_dem_window(
@@ -400,11 +348,11 @@ def vector_to_mask(
 
 
 def extract_elevation_bands(
-    dem: np.ma.MaskedArray | np.ndarray,
+    dem: Path | str,
     band_width: float,
     mask: np.ndarray = None,
     smooth_dem: bool = True,
-) -> list[ElevationBand]:
+) -> list[BandLimits]:
     """Extract elevation bands from a DEM.
 
     Args:
@@ -416,81 +364,60 @@ def extract_elevation_bands(
     Returns:
         List[ElevationBand]: List of elevation bands.
     """
-    if isinstance(dem, np.ma.MaskedArray):
-        dem_data = dem.data
-        mask = dem.mask
-    elif isinstance(dem, np.ndarray):
-        dem_data = dem
-        if mask is None:
-            logger.warning("No mask provided, assuming np.nan as nodata")
-            mask = np.isnan(dem_data)
-    else:
-        raise ValueError("Invalid dem input data type")
 
-    if smooth_dem:
-        # Create smoothed array for extracting elevation bands
-        array = dem_data.copy()
-        array[mask] = np.nan
+    with rio.open(dem) as src:
+        array = src.read(1, masked=True)
 
-        # Apply median filter to remove outliers
-        filter_size = min(5, round(min(array.shape) / 4))
-        array = median_filter(array, size=filter_size)
+        # Get robust min/max values for elevation bands and round to precision
+        logger.info("Extracting elevation bands...")
+        round_decimal = int(np.log10(band_width))
+        min_elev = np.percentile(array[~mask], 1)
+        max_elev = np.percentile(array[~mask], 99)
+        min_elev_bands = round_to_decimal(min_elev, round_decimal, np.floor)
+        max_elev_bands = round_to_decimal(max_elev, round_decimal, np.ceil)
 
-        # Smoot dem with a gaussian filter (temporary fill nans with nearest neighbor and exclude them after smoothing)
-        nan_mask = np.isnan(array)
-        interpolator = NearestNDInterpolator(np.argwhere(~nan_mask), array[~nan_mask])
-        array[nan_mask] = interpolator(np.argwhere(nan_mask))
-        array = gaussian_filter(array, sigma=filter_size)
-        array[mask] = np.nan
+        if smooth_dem:
+            logger.info("Smoothing DEM before extracting elevation bands")
+            # Create smoothed array for extracting elevation bands
+            array[mask] = np.nan
 
-    else:
-        array = dem_data
+            # Apply median filter to remove outliers
+            filter_size = min(5, round(min(array.shape) / 4))
+            array = median_filter(array, size=filter_size)
 
-    # Get robust min/max values for elevation bands and round to precision
-    round_decimal = int(np.log10(band_width))
-    min_elev = np.percentile(dem_data[~mask], 1)
-    max_elev = np.percentile(dem_data[~mask], 99)
-    min_elev_bands = round_to_decimal(min_elev, round_decimal, np.floor)
-    max_elev_bands = round_to_decimal(max_elev, round_decimal, np.ceil)
+            # Smoot dem with a gaussian filter (temporary fill nans with nearest neighbor and exclude them after smoothing)
+            nan_mask = np.isnan(array)
+            if np.any(nan_mask):
+                # Compute indices of the nearest non-NaN point for each NaN element
+                _, (i_idx, j_idx) = distance_transform_edt(
+                    nan_mask, return_distances=True, return_indices=True
+                )
+                array[nan_mask] = array[i_idx[nan_mask], j_idx[nan_mask]]
+            array = gaussian_filter(array, sigma=filter_size)
+            array[mask] = np.nan
+            logger.info("DEM smoothing completed")
 
-    # Create elevation bands from robust statistics
-    bands = np.arange(min_elev_bands, max_elev_bands + band_width, band_width)
-    logger.debug(f"Found {len(bands) - 1} elevation bands")
-    logger.debug(f"Min band elevation: {min_elev_bands:.0f} m")
-    logger.debug(f"Max band elevation: {max_elev_bands:.0f} m")
+        # Compute band limits
+        bands = np.arange(min_elev_bands, max_elev_bands + band_width, band_width)
+        band_limits = [
+            BandLimits(lower=bands[i], upper=bands[i + 1])
+            for i in range(len(bands) - 1)
+        ]
 
-    # Extract elevation bands
-    elevation_bands = []
-    for i in range(len(bands) - 1):
-        band_lower = bands[i]
-        band_upper = bands[i + 1]
-        label = f"{band_lower:.0f}-{band_upper:.0f}"
+        # logger.debug(f"Found {len(bands) - 1} elevation bands")
+        # logger.debug(f"Min band elevation: {min_elev_bands:.0f} m")
+        # logger.debug(f"Max band elevation: {max_elev_bands:.0f} m")
+        # logger.info(f"Extracted {len(elevation_bands)} elevation bands.")
 
-        # Create band mask (True where pixels should be masked)
-        band_mask = ~((array >= band_lower) & (array < band_upper)) | mask
-
-        # Add band to list
-        elevation_bands.append(
-            ElevationBand(
-                data=dem_data,
-                mask=band_mask,
-                lower=band_lower,
-                upper=band_upper,
-                label=label,
-            )
-        )
-
-    return elevation_bands
+    return band_limits
 
 
 if __name__ == "__main__":
     data_path = Path("/home/fioli/rse_aletsch/SPOT5_aletsch/pyasp_new/el_bands_sandbox")
-    dem_path = data_path / "004_005-006_S5_054-256-0_2003-07-08.tif"
-
-    dem_path.exists()
+    dem_path = data_path / "dem_aletsch.tif"
 
     eb = ElevationBands()
     eb.create_from_geotiff(dem_path, 100)
-    print(eb)
+    eb.to_file(data_path / "eb_test.tif")
 
-    eb.to_file()
+    print("Done")
