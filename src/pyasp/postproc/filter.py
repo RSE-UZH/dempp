@@ -5,6 +5,7 @@ from time import perf_counter
 
 import geopandas as gpd
 import numpy as np
+import pandas as pd
 import rasterio as rio
 import xdem
 from joblib import Parallel, delayed
@@ -12,14 +13,28 @@ from rasterio.windows import Window
 from scipy.stats import zscore
 from shapely.geometry import Polygon
 from tqdm import tqdm
+from tqdm.contrib.logging import logging_redirect_tqdm
 
 from pyasp.postproc.elevation_bands import (
+    ElevationBand,
     extract_dem_window,
     extract_elevation_bands,
     vector_to_mask,
 )
 
 logger = logging.getLogger("pyasp")
+
+
+def compute_nmad(data: np.ndarray) -> float:
+    """Calculate the normalized median absolute deviation (NMAD) of the data.
+
+    Args:
+        data (np.ndarray): Input data.
+
+    Returns:
+        float: NMAD of the data.
+    """
+    return 1.4826 * np.median(np.abs(data - np.median(data)))
 
 
 class OutlierMethod(Enum):
@@ -76,7 +91,7 @@ def find_outliers(
 
     elif method == OutlierMethod.ROBUST:
         median = np.median(valid_values)
-        nmad = 1.4826 * np.median(np.abs(valid_values - median))
+        nmad = compute_nmad(valid_values)
         outliers[~mask] = np.abs(data[~mask] - median) > n_limit * nmad
 
     else:
@@ -90,8 +105,10 @@ def filter_by_elevation_bands(
     band_width: float,
     method: OutlierMethod | list[OutlierMethod] = OutlierMethod.ROBUST,
     n_limit: float = 3,
+    smooth_elband_dem: bool = True,
+    elevation_bands: list[ElevationBand] = None,
     n_jobs: int = None,
-) -> np.ndarray:
+) -> tuple[np.ndarray, pd.DataFrame]:
     """Filter DEM by elevation bands using numpy operations.
 
     Args:
@@ -99,18 +116,23 @@ def filter_by_elevation_bands(
         band_width (float): The width of each elevation band.
         method (OutlierMethod | List[OutlierMethod], optional): Outlier detection method. If a list is provided, the filters will be applied sequentially and the final mask will be the union of all masks. Defaults to OutlierMethod.ROBUST.
         n_limit (float, optional): Number of std/mad for outlier threshold. Defaults to 3.
+        smooth_elband_dem (bool, optional): Whether to smooth the DEM for the extraction of the elevation bands. Defaults to True.
+        elevation_bands (list[ElevationBand], optional): List of elevation bands. If None, the bands will be extracted from the DEM. Defaults to None.
+
         n_jobs (int, optional): Number of parallel jobs (-1 for all cores, 1 to process sequentially). Defaults to None.
 
     Returns:
-        np.ndarray: Boolean array marking outliers.
+        tuple(np.ndarray, pd.DataFrame): The outlier mask and the elevation bands statistics.
     """
 
     def _process_single_band(band, method, n_limit):
         """Process a single elevation band with multiple outlier detection methods."""
-        outlier_mask = np.zeros_like(band.data.data, dtype=bool)
+        # Find outliers in band
+        outlier_mask = np.zeros_like(band.masked_data.data, dtype=bool)
         for m in method:
-            band_outliers = find_outliers(band.data, method=m, n_limit=n_limit)
+            band_outliers = find_outliers(band.masked_data, method=m, n_limit=n_limit)
             outlier_mask |= band_outliers
+
         return outlier_mask
 
     if not isinstance(method, list):
@@ -126,7 +148,18 @@ def filter_by_elevation_bands(
         dem_data = dem
 
     # Extract elevation bands
-    elevation_bands = extract_elevation_bands(dem, band_width, base_mask)
+    if elevation_bands is None:
+        logger.debug("Extracting elevation bands...")
+        elevation_bands = extract_elevation_bands(
+            dem=dem,
+            band_width=band_width,
+            mask=base_mask,
+            smooth_dem=smooth_elband_dem,
+        )
+    else:
+        logger.debug("Using provided elevation bands.")
+        if not all(isinstance(b, ElevationBand) for b in elevation_bands):
+            raise ValueError("All elevation bands must be of type ElevationBand.")
 
     # Decide if to use parallel processing or not depending on the number of bands and the number of filtering methods. If this number is high, use parallel processing, otherwise process the bands sequentially.
     if len(elevation_bands) * len(method) > 20:
@@ -146,7 +179,28 @@ def filter_by_elevation_bands(
     # Make sure to exclude masked values from outlier mask
     outlier_mask[base_mask] = False
 
-    return outlier_mask
+    # Update each band's mask with the outliers
+    for band in elevation_bands:
+        band.masked_data.mask |= outlier_mask
+
+    # Create DataFrame with the elevation band statistics for further analysis
+    def _get_band_stats(band: ElevationBand):
+        """Get statistics for a single band."""
+        band.compute_statistics()
+        return {
+            "center": band.center,
+            "lower": band.lower,
+            "upper": band.upper,
+            "mean": band.stats["mean"],
+            "std": band.stats["std"],
+            "median": band.stats["median"],
+            "nmad": band.stats["nmad"],
+            "pixel": band.stats["pixel"],
+        }
+
+    df = pd.DataFrame([{**_get_band_stats(band)} for band in elevation_bands])
+
+    return outlier_mask, df
 
 
 def get_outlier_mask(
@@ -157,7 +211,8 @@ def get_outlier_mask(
     use_elevation_bands: bool = True,
     elevation_band_width: float = 100,
     geometry_id: str = None,  # Optional for logging
-) -> tuple[np.ndarray, Window]:
+    **kwargs,
+) -> tuple[np.ndarray, Window, pd.DataFrame]:
     """Process a single glacier and return its outlier mask.
 
     Args:
@@ -168,9 +223,10 @@ def get_outlier_mask(
         use_elevation_bands (bool, optional): Whether to use elevation bands for filtering. Defaults to True.
         elevation_band_width (float): Width of elevation bands.
         geometry_id (str, optional): Optional geometry_id for logging. Defaults to None.
+        **kwargs: Additional keyword arguments to be passed to the filter_by_elevation_bands() function.
 
     Returns:
-        Tuple[np.ndarray, Window]: The outlier mask and the DEM window.
+        Tuple[np.ndarray, Window, pd.Dataframe]: The outlier mask, the DEM window and the elevation bands statistics (if use_elevation_bands=True, else None).
     """
 
     if geometry_id is None:
@@ -224,11 +280,12 @@ def get_outlier_mask(
 
     # Filter DEM based on elevation bands
     if use_elevation_bands:
-        outlier_mask = filter_by_elevation_bands(
+        outlier_mask, bands_stats = filter_by_elevation_bands(
             dem=masked_dem,
             band_width=elevation_band_width,
             method=filter_method,
             n_limit=n_limit,
+            **kwargs,
         )
     else:
         # Filter the entire DEM
@@ -237,9 +294,10 @@ def get_outlier_mask(
             method=filter_method,
             n_limit=n_limit,
         )
+        bands_stats = None
     logger.debug(f"Finished processing glacier {geometry_id}")
 
-    return outlier_mask, window
+    return outlier_mask, window, bands_stats
 
 
 def apply_mask_to_dem(
@@ -266,11 +324,12 @@ def apply_mask_to_dem(
 def filter_dem(
     dem_path: Path | str,
     output_path: Path | str = None,
-    boundary: gpd.GeoDataFrame | None = None,
+    boundary: gpd.GeoDataFrame | Path | str | None = None,
     filter_method: OutlierMethod | list[OutlierMethod] = OutlierMethod.ROBUST,
     n_limit: float = 3,
     use_elevation_bands: bool = True,
     elevation_band_width: float = 100,
+    **kwargs,
 ) -> tuple[xdem.DEM, np.ndarray]:
     """
     filter_dem Filter a DEM, optionally within a given boundary (e.g. glacier) using outlier detection.
@@ -278,11 +337,13 @@ def filter_dem(
     Args:
         dem_path (Path | str): Path to DEM file.
         output_path (Path | str): Path to save the output DEM file. Defaults to None.
-        boundary (gpd.GeoDataFrame | None): Boundary geometry to filter the DEM within. Defaults to None.
+        boundary (gpd.GeoDataFrame | Path | str | None): Boundary geometry to filter the DEM within. Defaults to None.
         filter_method (OutlierMethod | list[OutlierMethod], optional): Outlier detection method. If a list is provided, the filters will be applied sequentially and the final mask will be the union of all masks. Defaults to OutlierMethod.ROBUST.
         n_limit (float, optional): Number of std/mad for outlier threshold. Defaults to 3.
         use_elevation_bands (bool, optional): Whether to use elevation bands for filtering. Defaults to True.
         elevation_band_width (float, optional): Width of elevation bands. Defaults to 100.
+        **kwargs: Additional keyword arguments to be passed to the filter_by_elevation_bands() function.
+
 
     Returns:
         tuple[xdem.DEM, np.ndarray]: The filtered DEM and the final outlier mask.
@@ -293,16 +354,19 @@ def filter_dem(
         dem_shape = src.shape
 
     if boundary is not None:
+        if isinstance(boundary, (Path | str)):
+            boundary = gpd.read_file(boundary).to_crs(dem_crs)
         boundary = boundary.to_crs(dem_crs)
 
     # Get outlier mask
-    outlier_mask, window = get_outlier_mask(
+    outlier_mask, window, stats = get_outlier_mask(
         dem_path=dem_path,
         boundary=boundary,
         filter_method=filter_method,
         n_limit=n_limit,
         use_elevation_bands=use_elevation_bands,
         elevation_band_width=elevation_band_width,
+        **kwargs,
     )
 
     # Create final mask
@@ -324,7 +388,7 @@ def filter_dem(
         dem_path=dem_path, mask=final_mask, output_path=output_path
     )
 
-    return filtered_dem, final_mask
+    return filtered_dem, final_mask, stats
 
 
 def filter_dem_by_glacier(
@@ -336,6 +400,7 @@ def filter_dem_by_glacier(
     use_elevation_bands: bool = True,
     elevation_band_width: float = 100,
     n_jobs: int = -1,
+    **kwargs,
 ) -> tuple[xdem.DEM, np.ndarray]:
     """Process multiple glaciers and combine their outlier masks.
 
@@ -348,6 +413,7 @@ def filter_dem_by_glacier(
         use_elevation_bands (bool, optional): Whether to use elevation bands for filtering. Defaults to True.
         elevation_band_width (float, optional): Width of elevation bands. Defaults to 50.
         n_jobs (int, optional): Number of parallel jobs (-1 for all cores, 1 to process sequentially). Defaults to -1.
+        **kwargs: Additional keyword arguments to be passed to the filter_by_elevation_bands() function.
 
     Returns:
         Tuple[xdem.DEM, np.ndarray]: The filtered DEM and the final outlier mask.
@@ -362,18 +428,20 @@ def filter_dem_by_glacier(
 
     # Process glaciers in parallel
     logger.info("Filtering DEM based on elevation bands for each glacier...")
-    results = Parallel(n_jobs=n_jobs, prefer="threads")(
-        delayed(get_outlier_mask)(
-            dem_path=dem_path,
-            boundary=row.geometry,
-            elevation_band_width=elevation_band_width,
-            filter_method=filter_method,
-            n_limit=n_limit,
-            use_elevation_bands=use_elevation_bands,
-            geometry_id=row["rgi_id"] if "rgi_id" in row else None,
+    with logging_redirect_tqdm([logger]):
+        results = Parallel(n_jobs=n_jobs, prefer="threads")(
+            delayed(get_outlier_mask)(
+                dem_path=dem_path,
+                boundary=row.geometry,
+                elevation_band_width=elevation_band_width,
+                filter_method=filter_method,
+                n_limit=n_limit,
+                use_elevation_bands=use_elevation_bands,
+                geometry_id=row.get("rgi_id", None),
+                **kwargs,
+            )
+            for _, row in tqdm(glacier_outlines.iterrows())
         )
-        for _, row in tqdm(glacier_outlines.iterrows())
-    )
     logger.info("Finished processing all glaciers. Combining results...")
 
     # Combine results into final mask

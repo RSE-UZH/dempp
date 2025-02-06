@@ -1,7 +1,6 @@
 import logging
 from collections.abc import Callable
-from dataclasses import dataclass
-from enum import Enum
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import geopandas as gpd
@@ -17,12 +16,16 @@ from shapely.geometry import Polygon
 logger = logging.getLogger("pyasp")
 
 
-class OutlierMethod(Enum):
-    """Methods for outlier detection"""
+def compute_nmad(data: np.ndarray) -> float:
+    """Calculate the normalized median absolute deviation (NMAD) of the data.
 
-    ZSCORE = "zscore"  # z-score
-    NORMAL = "normal"  # mean/std
-    ROBUST = "robust"  # median/nmad
+    Args:
+        data (np.ndarray): Input data.
+
+    Returns:
+        float: NMAD of the data.
+    """
+    return 1.4826 * np.median(np.abs(data - np.median(data)))
 
 
 @dataclass(kw_only=True)
@@ -57,12 +60,90 @@ class DEMWindow:
             dst.write(self.data, 1)
 
 
-@dataclass
+@dataclass(kw_only=True)
 class ElevationBand:
-    label: str
-    band_lower: float
-    band_upper: float
-    data: np.ma.MaskedArray
+    mask: np.ndarray = field(repr=False)
+    data: np.ndarray = field(default=None, repr=False)
+    lower: float = None
+    upper: float = None
+    center: float = None
+    width: float = None
+    label: str = None
+    has_data: bool = False
+    stats: dict = field(default_factory=dict, repr=False)
+
+    def __post_init__(self):
+        if self.data is not None:
+            self.has_data = True
+            self.compute_statistics()
+
+        if self.lower is not None and self.upper is not None:
+            self.center = (self.lower + self.upper) / 2
+            self.width = self.upper - self.lower
+        elif self.center is not None and self.width is not None:
+            self.lower = self.center - self.width / 2
+            self.upper = self.center + self.width / 2
+        else:
+            raise ValueError(
+                "Either band_lower/band_upper or center/width must be provided"
+            )
+        if self.label is None:
+            self.label = f"{self.band_lower:.0f}-{self.band_upper:.0f}"
+
+    @property
+    def masked_data(self):
+        if self.data is None:
+            raise ValueError("Data not set. Load masked data using load_masked_data()")
+        return self.load_masked_data(self.data)
+
+    def get_data(self):
+        if self.data is None:
+            raise ValueError("Data not set. Load masked data using load_masked_data()")
+        return self.data
+
+    def compute_statistics(self):
+        if not self.has_data:
+            raise ValueError("Data not loaded. Load data using load_masked_data()")
+        ma_data = self.masked_data.compressed()
+        self.stats = {
+            "mean": np.mean(ma_data),
+            "median": np.median(ma_data),
+            "std": np.std(ma_data),
+            "nmad": compute_nmad(ma_data),
+            "pixel": ma_data.size,
+        }
+
+    def info(self, stats: bool = True):
+        info_str = f"""Elevation band: {self.label}\n
+            - Center: {self.center:.0f} m\n  
+            - Width: {self.width:.0f} m\n 
+        """
+        if stats:
+            info_str += f"""Statistics:\n
+                - Mean: {self.stats["mean"]:.2f}\n
+                - Median: {self.stats["median"]:.2f}\n
+                - Std: {self.stats["std"]:.2f}\n
+                - NMAD: {self.stats["nmad"]:.2f}\n
+                - Valid pixels: {self.stats["pixel"]}\n
+            """
+        logger.info(info_str)
+
+    def get_stats(self):
+        if not self.has_data:
+            raise ValueError("Data not loaded. Load data using load_masked_data()")
+        return self.stats
+
+    def load_masked_data(
+        self,
+        data: np.ndarray,
+    ) -> np.ma.MaskedArray:
+        if self.mask is None:
+            raise ValueError("Mask not set. Unable to load data without mask")
+        return np.ma.masked_array(data, mask=self.mask)
+
+    def to_dict(self):
+        """Convert elevation band to dictionary"""
+        return self.__dict__
 
 
 def round_to_decimal(
@@ -285,35 +366,6 @@ def extract_elevation_bands(
         array = gaussian_filter(array, sigma=filter_size)
         array[mask] = np.nan
 
-        # For debug: write to file both the original dem and the smoothed dem
-        # with tempfile.NamedTemporaryFile(suffix="demdata.tif", dir=".") as tmp:
-        #     with rio.open(
-        #         tmp.name,
-        #         "w",
-        #         driver="GTiff",
-        #         height=dem_data.shape[0],
-        #         width=dem_data.shape[1],
-        #         count=1,
-        #         dtype=dem_data.dtype,
-        #         crs=CRS.from_epsg(32632),
-        #         transform=rio.Affine(10, 0, 0, 0, -10, 0),
-        #         nodata=-9999,
-        #     ) as dst:
-        #         dst.write(dem_data, 1)
-        # with tempfile.NamedTemporaryFile(suffix="demdata_smoothed.tif", dir=".") as tmp:
-        #     with rio.open(
-        #         tmp.name,
-        #         "w",
-        #         driver="GTiff",
-        #         height=array.shape[0],
-        #         width=array.shape[1],
-        #         count=1,
-        #         dtype=array.dtype,
-        #         crs=CRS.from_epsg(32632),
-        #         transform=rio.Affine(10, 0, 0, 0, -10, 0),
-        #         nodata=np.nan,
-        #     ) as dst:
-        #         dst.write(array, 1)
     else:
         array = dem_data
 
@@ -340,16 +392,14 @@ def extract_elevation_bands(
         # Create band mask (True where pixels should be masked)
         band_mask = ~((array >= band_lower) & (array < band_upper)) | mask
 
-        # Create masked array for band
-        band_data = np.ma.masked_array(dem_data, mask=band_mask)
-
         # Add band to list
         elevation_bands.append(
             ElevationBand(
+                data=dem_data,
+                mask=band_mask,
+                lower=band_lower,
+                upper=band_upper,
                 label=label,
-                band_lower=band_lower,
-                band_upper=band_upper,
-                data=band_data,
             )
         )
 
