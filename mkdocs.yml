@@ -1,0 +1,30 @@
+site_name: My Docs
+site_url: http://127.0.0.1:8000
+repo_url: https://github.com/RSE-UZH/pyasp
+site_author: RSE-UZH
+
+theme:
+  name: readthedocs
+  features:
+    - navigation.path
+    - navigation.footer
+
+plugins:
+  - search
+  - autorefs
+  - mkdocstrings:
+      handlers:
+        python:
+          paths: [src] # search packages in the src folder
+          docstring_style: google
+          docstring_options: true
+          options:
+            docstring_section_style: spacy
+            show_source: false
+            heading_level: 2
+            group_by_category: true
+            filters: ["!^_", "^__init__$"]
+            show_root_full_path: false
+
+nav:
+  - Home: index.md

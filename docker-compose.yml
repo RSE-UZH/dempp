@@ -1,0 +1,12 @@
+services:
+  pyasp:
+    build:
+      context: .
+    container_name: run-pyasp  
+    volumes:
+      - ./demo:/workspace/demo
+      - ./data:/workspace/data
+    environment:
+      - PYTHONPATH=/workspace
+    working_dir: /workspace
+    tty: true
