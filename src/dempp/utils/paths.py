@@ -1,30 +1,33 @@
 from pathlib import Path
 
 
-def check_path(path: str | Path) -> Path:
-    """Check if a path exists and return a Path object.
+def check_path(path: str | Path, error_prefix: str = "Path") -> Path:
+    """Check if a file exists and return a Path object.
 
     Args:
-        path (str | Path): The path to check.
+        path (str | Path): The file to check.
+        error_prefix (str, optional): The error message prefix. Defaults to "Path".
 
     Returns:
         Path: The Path object.
 
     Raises:
-        FileNotFoundError: If the path does not exist.
+        FileNotFoundError: If the file does not exist.
     """
 
     path = Path(path)
     if not path.exists():
-        raise FileNotFoundError(f"Path {path} does not exist")
+        raise FileNotFoundError(f"{error_prefix} {path} does not exist")
     return path
 
 
-def check_dir(path: str | Path) -> Path:
+def check_dir(path: str | Path, error_prefix: str = "Directory") -> Path:
     """Check if a directory exists and return a Path object.
 
     Args:
         path (str | Path): The directory to check.
+        error_prefix (str, optional): The error message prefix. Defaults to "Directory".
+
 
     Returns:
         Path: The Path object.
@@ -35,7 +38,7 @@ def check_dir(path: str | Path) -> Path:
 
     path = Path(path)
     if not path.is_dir():
-        raise FileNotFoundError(f"Directory {path} does not exist")
+        raise FileNotFoundError(f"{error_prefix} {path} does not exist")
     return path
 
 

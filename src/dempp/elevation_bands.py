@@ -12,6 +12,7 @@ from shapely.geometry import Polygon
 from tqdm import tqdm
 
 from dempp.math import round_to_decimal
+from dempp.utils.paths import check_path
 
 logger = logging.getLogger("dempp")
 
@@ -71,9 +72,7 @@ class ElevationBands:
     ):
         """Extract elevation bands from the reference DEM."""
 
-        dem_path = Path(dem_path)
-        if not dem_path.exists():
-            raise FileNotFoundError(f"File not found: {dem_path}")
+        dem_path = check_path(dem_path, "DEM")
         self.dem_path = dem_path
         self.polygon = polygon
         self.band_width = band_width
@@ -269,8 +268,7 @@ def load_dem(
     crop: bool = True,
     pad: bool = True,
 ) -> tuple[np.ma.MaskedArray, rio.Affine, rio.windows.Window, CRS]:
-    if not path.exists():
-        raise FileNotFoundError(f"File not found: {path}")
+    path = check_path(path)
 
     with rio.open(path) as src:
         crs = src.crs

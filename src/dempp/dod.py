@@ -9,6 +9,7 @@ from dempp.raster_statistics import (
     compute_raster_statistics,
     plot_raster_statistics,
 )
+from dempp.utils.paths import check_path
 
 logger = logging.getLogger("dempp")
 
@@ -101,14 +102,10 @@ def compute_dod_stats(
     """
     # Load DEMs if paths are provided
     if isinstance(dem, (Path | str)):
-        dem = Path(dem)
-        if not dem.exists():
-            raise FileNotFoundError(f"DEM file not found: {dem}")
+        dem = check_path(dem, "DEM")
         dem = xdem.DEM(dem)
     if isinstance(reference, (Path | str)):
-        reference = Path(reference)
-        if not reference.exists():
-            raise FileNotFoundError(f"Reference DEM file not found: {reference}")
+        reference = check_path(reference, "Reference DEM")
         reference = xdem.DEM(reference)
 
     # Validate inputs
