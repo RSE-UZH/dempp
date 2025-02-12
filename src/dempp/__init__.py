@@ -4,7 +4,7 @@ from pathlib import Path
 # Import submodules
 from . import (
     elevation_bands,  # noqa
-    filter,  # noqa
+    # filter,  # noqa
     io,  # noqa
     raster_statistics,  # noqa
     utils,  # noqa
