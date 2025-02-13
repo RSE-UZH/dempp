@@ -12,7 +12,7 @@ maintainers = [
     { name = "Remote sensing of Environmental Changes Group UZH", email = "francesco.ioli@geo.uzh.ch" },
 ]
 license = { file = "LICENSE" }
-requires-python = ">=3.11"
+requires-python = ">=3.10"
 keywords = ["ASP", "DEM", "photogrammetry", "stereo"]
 classifiers = [
     "Development Status :: 3 - Alpha",
@@ -30,7 +30,7 @@ dependencies = [
     "xdem",
     "geoutils",
     "omegaconf",
-    "dask[distributed]",
+    "dask",
     "geopandas",
     "shapely",
     "seaborn",
