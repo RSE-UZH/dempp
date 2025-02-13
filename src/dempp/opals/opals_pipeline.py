@@ -3,8 +3,13 @@ import json
 import logging
 from pathlib import Path
 
-from opals import LSM, Algebra, FillGaps, Grid, Import, Info, Types  # noqa
-from opals.tools import processor  # noqa
+try:
+    from opals import LSM, Algebra, FillGaps, Grid, Import, Info, Types  # noqa
+    from opals.tools import processor  # noqa
+except ImportError:
+    raise ImportError(
+        "OPALS is required to run this script. Please, install it first."
+    ) from None
 
 logger = logging.getLogger()
 

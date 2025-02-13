@@ -289,7 +289,7 @@ def load_dem(
             dem = np.ma.masked_array(dem_array, mask=mask)
 
         else:
-            # Load the entire DEM and store it as Dask array
+            # Load the entire DEM
             dem = src.read(1, masked=True)
             transform = src.transform
             window = Window(0, 0, src.width, src.height)
