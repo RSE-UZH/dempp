@@ -3,13 +3,8 @@ import json
 import logging
 from pathlib import Path
 
-try:
-    from opals import LSM, Algebra, FillGaps, Grid, Import, Info, Types  # noqa
-    from opals.tools import processor  # noqa
-except ImportError:
-    raise ImportError(
-        "OPALS is required to run this script. Please, install it first."
-    ) from None
+from opals import LSM, Algebra, FillGaps, Grid, Import, Info, Types  # noqa
+from opals.tools import processor  # noqa
 
 logger = logging.getLogger()
 
@@ -41,42 +36,54 @@ FILL_CFG = {
 }
 
 
-def mask_dem(
-    dem_path: Path,
-    stable_mask_path: Path,
-    output_path: Path,
-) -> Algebra.Algebra:
-    return Algebra.Algebra(
-        inFile=[str(stable_mask_path), str(dem_path)],
-        outFile=str(output_path),
-        limit="dataset:0",
-        formula="r[1]",
-    )
+class OpalsPipeline:
+    def __init__(
+        self,
+        opals_proc_dir: Path | None = None,
+        fill_holes: bool = True,
+        lsm_cfg: dict | None = None,
+        grid_cfg: dict | None = None,
+        fill_cfg: dict | None = None,
+    ):
+        self.opals_proc_dir = opals_proc_dir
+        self.fill_holes = fill_holes
+        self.lsm_cfg = lsm_cfg if lsm_cfg else {}
+        self.grid_cfg = grid_cfg if grid_cfg else {}
+        self.fill_cfg = fill_cfg if fill_cfg else {}
+        self.logger = logging.getLogger(__name__)
 
+    def __enter__(self):
+        return self
 
-def clean_lsm_tmp_files(dir: Path = Path(".")):
-    lsm_tmp_files = ["fix_dx.tif", "fix_dy.tif", "fixSctn.tif", "movSctn.tif"]
-    for file in lsm_tmp_files:
-        (dir / file).unlink(missing_ok=True)
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.cleanup()
+        if exc_type is not None:
+            self.logger.error(f"Error occurred: {exc_val}")
+            return False
+        return True
 
+    def run(
+        self,
+        dem_path: Path,
+        ref_path: Path,
+        stable_mask_path: Path,
+        pcd_path: Path | None = None,
+    ) -> Path:
+        return main(
+            dem_path=dem_path,
+            ref_path=ref_path,
+            stable_mask_path=stable_mask_path,
+            pcd_path=pcd_path,
+            opals_proc_dir=self.opals_proc_dir,
+            fill_holes=self.fill_holes,
+            lsm_cfg=self.lsm_cfg,
+            grid_cfg=self.grid_cfg,
+            fill_cfg=self.fill_cfg,
+        )
 
-def filter_and_transform_pc(pcd_path, out_path, z_min=600, z_max=4000):
-    try:
-        import laspy
-    except ImportError:
-        raise ImportError(
-            "laspy is required to read LAS/LAZ files. Please, install it first."
-        ) from None
-
-    # Read LAS/LAZ file
-    las = laspy.read(pcd_path)
-
-    # Filter points by Z coordinate
-    mask = (las.z >= z_min) & (las.z <= z_max)
-    filtered_las = las[mask]
-
-    # Save filtered point cloud temporarily
-    filtered_las.write(out_path)
+    def cleanup(self):
+        if self.opals_proc_dir and self.opals_proc_dir.exists():
+            clean_lsm_tmp_files(self.opals_proc_dir)
 
 
 def main(
@@ -143,7 +150,6 @@ def main(
         **lsm_cfg,
     )
     lsm.run()
-    clean_lsm_tmp_files()
     logger.info(f"LSM coregistration done for {dem_path.stem}")
 
     # Import point cloud to ODM applying the estimated LSM transformation
@@ -185,12 +191,51 @@ def main(
         output_path = opals_dem_path
 
     # Clean up
+    clean_lsm_tmp_files()
     importer.reset()
     gridder.reset()
     if fill_holes:
         filler.reset()
 
     return output_path
+
+
+def mask_dem(
+    dem_path: Path,
+    stable_mask_path: Path,
+    output_path: Path,
+) -> Algebra.Algebra:
+    return Algebra.Algebra(
+        inFile=[str(stable_mask_path), str(dem_path)],
+        outFile=str(output_path),
+        limit="dataset:0",
+        formula="r[1]",
+    )
+
+
+def clean_lsm_tmp_files(dir: Path = Path(".")):
+    lsm_tmp_files = ["fix_dx.tif", "fix_dy.tif", "fixSctn.tif", "movSctn.tif"]
+    for file in lsm_tmp_files:
+        (dir / file).unlink(missing_ok=True)
+
+
+def filter_and_transform_pc(pcd_path, out_path, z_min=600, z_max=4000):
+    try:
+        import laspy
+    except ImportError:
+        raise ImportError(
+            "laspy is required to read LAS/LAZ files. Please, install it first."
+        ) from None
+
+    # Read LAS/LAZ file
+    las = laspy.read(pcd_path)
+
+    # Filter points by Z coordinate
+    mask = (las.z >= z_min) & (las.z <= z_max)
+    filtered_las = las[mask]
+
+    # Save filtered point cloud temporarily
+    filtered_las.write(out_path)
 
 
 def parse_cli():
