@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "dempp"
 version = "0.0.1"
-description = "Python package for Ames Stereo Pipeline processing"
+description = ""
 readme = "README.md"
 authors = [{ name = "Francesco Ioli", email = "francesco.ioli@geo.uzh.ch" }]
 maintainers = [
@@ -13,7 +13,7 @@ maintainers = [
 ]
 license = { file = "LICENSE" }
 requires-python = ">=3.10"
-keywords = ["ASP", "DEM", "photogrammetry", "stereo"]
+keywords = []
 classifiers = [
     "Development Status :: 3 - Alpha",
     "License :: OSI Approved :: BSD License",
@@ -35,6 +35,7 @@ dependencies = [
     "shapely",
     "seaborn",
     "graphviz",
+    "cmcrameri",
 ]
 
 [project.urls]

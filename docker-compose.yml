@@ -1,12 +1,13 @@
+name: dempp
+
 services:
   dempp:
     build:
       context: .
     container_name: run-dempp  
     volumes:
-      - ./demo:/workspace/demo
-      - ./data:/workspace/data
-    environment:
-      - PYTHONPATH=/workspace
+      - $HOME:/workspace
     working_dir: /workspace
     tty: true
+    ports:
+      - 8888:8888
