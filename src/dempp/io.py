@@ -7,11 +7,13 @@ import numpy as np
 import xdem
 from tqdm import tqdm
 
+from dempp.utils.paths import check_path
+
 logger = logging.getLogger("dempp")
 
 
 def load_dem(
-    dem_path: Path,
+    dem_path: Path | str,
     area_or_point: str | None = None,
     vrcs: str | None = None,
 ) -> xdem.DEM:
@@ -29,6 +31,7 @@ def load_dem(
         ValueError: If area_or_point is not 'area' or 'point'
         FileNotFoundError: If DEM file doesn't exist
     """
+    dem_path = check_path(dem_path, "DEM")
     dem = xdem.DEM(dem_path)
     if area_or_point:
         if area_or_point not in ["area", "point"]:
