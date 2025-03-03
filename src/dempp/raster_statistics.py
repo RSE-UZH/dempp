@@ -9,7 +9,6 @@ import geopandas as gpd
 import geoutils as gu
 import matplotlib.pyplot as plt
 import numpy as np
-import seaborn as sns
 import xdem
 
 logger = logging.getLogger("dempp")
@@ -124,7 +123,7 @@ def compute_raster_statistics(
 
 
 def plot_raster_statistics(
-    raster: np.ma.MaskedArray,
+    raster: np.ndarray | np.ma.MaskedArray,
     output_file: Path | str | None = None,
     stats: RasterStatistics = None,
     xlim: tuple[float, float] | None = None,
@@ -135,7 +134,7 @@ def plot_raster_statistics(
     annotate_cfg: dict | None = None,
     save_cfg: dict | None = None,
 ) -> tuple[plt.Figure, tuple[plt.Axes, plt.Axes]]:
-    """Plot histogram with KDE and boxplot of a r.
+    """Plot histogram and boxplot of a raster.
 
     Args:
         raster (np.ma.MaskedArray): Masked array of.
@@ -144,8 +143,8 @@ def plot_raster_statistics(
         xlim (tuple[float, float] | None, optional): Tuple of (min, max) to set x-axis limits. Defaults to None.
         fig_cfg (dict | None, optional): Configuration for plt.subplots() call. Defaults to None.
         ax_cfg (dict | None, optional): Configuration for axes (xticks, grid, etc.). Defaults to None.
-        hist_cfg (dict | None, optional): Configuration for sns.histplot(). Defaults to None.
-        box_cfg (dict | None, optional): Configuration for sns.boxplot(). Defaults to None.
+        hist_cfg (dict | None, optional): Configuration for histogram. Defaults to None.
+        box_cfg (dict | None, optional): Configuration for boxplot. Defaults to None.
         annotate_cfg (dict | None, optional): Configuration for statistics annotation. Defaults to None.
         save_cfg (dict | None, optional): Configuration for fig.savefig(). Defaults to None.
 
@@ -164,15 +163,20 @@ def plot_raster_statistics(
         "grid": False,
     }
     hist_params = {
-        "bins": 50,
-        "kde": True,
-        "stat": "density",
+        "bins": 100,
+        "density": True,
+        "color": "C0",
         "edgecolor": "black",
+        "alpha": 0.7,
     }
     box_params = {
-        "orient": "h",
-        "width": 0.5,
-        "color": "skyblue",
+        "vert": False,
+        "widths": 0.5,
+        "patch_artist": True,
+        "boxprops": {"facecolor": "skyblue"},
+        "medianprops": {"color": "black"},
+        "whiskerprops": {"color": "black"},
+        "capprops": {"color": "black"},
     }
     annotate_params = {
         "fontsize": 10,
@@ -195,18 +199,29 @@ def plot_raster_statistics(
     if save_cfg is not None:
         save_params.update(save_cfg)
 
+    # Flatten the raster to 1D array
+    if isinstance(raster, np.ma.MaskedArray):
+        array = raster.compressed()
+    elif isinstance(raster, np.ndarray):
+        array = raster.flatten()
+    else:
+        raise TypeError(
+            "Invalid raster provided. Must be a masked array or numpy array."
+        )
+
     # Create figure with Histogram and Boxplot
     fig, (ax1, ax2) = plt.subplots(2, 1, **fig_params)
 
-    # Histogram with KDE on the first axis
-    sns.histplot(raster.compressed(), ax=ax1, **hist_params)
-    ax1.set_title("Histogram of Differences with KDE")
+    # Plot histogram
+    ax1.hist(array, **hist_params)
     ax1.set_ylabel("Density")
 
-    # Boxplot on the second axis
-    sns.boxplot(x=raster.compressed(), ax=ax2, **box_params)
-    ax2.set_title("Boxplot of Differences")
-    ax2.set_xlabel("Height Difference [m]")
+    # Create boxplot on the second axis using matplotlib (instead of seaborn)
+    ax2.boxplot([array], **box_params)
+    ax2.set_xlabel("Values")
+
+    # Remove y-tick labels from boxplot as they're not relevant
+    ax2.set_yticks([])
 
     # Set x-axis limits if provided
     if xlim is not None:
