@@ -163,7 +163,7 @@ def plot_raster_statistics(
         "grid": False,
     }
     hist_params = {
-        "bins": 100,
+        "bins": 50,
         "density": True,
         "color": "C0",
         "edgecolor": "black",

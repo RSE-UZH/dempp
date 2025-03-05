@@ -202,11 +202,10 @@ def process_dod(
 
         # Generate plot if requested
         if make_plot:
-            plot_path = output_dir / f"{output_prefix}_plot.png"
-            plt_cfg = plt_cfg or {}
-
             # Apply mask if provided
             plot_data = apply_mask(dod, mask_obj) if mask_obj is not None else dod.data
+            plot_path = output_dir / f"{output_prefix}_plot.png"
+            plt_cfg = plt_cfg or {}
             plot_raster_statistics(
                 raster=plot_data,
                 output_file=plot_path,
