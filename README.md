@@ -78,7 +78,7 @@ Contains functions for computing and analyzing Difference of DEMs (DoDs).
 -   `compute_dod(dem: xdem.DEM, reference: xdem.DEM) -> xdem.DEM`: Computes the DoD between two DEMs.
 -   `compute_dod_stats(dem: xdem.DEM, reference: xdem.DEM, make_plot: bool = True) -> RasterStatistics`: Computes statistics on the DoD and optionally generates a plot.
 
-### `dempp.raster_statistics`
+### `dempp.statistics`
 
 Defines classes and functions for calculating raster statistics.
 

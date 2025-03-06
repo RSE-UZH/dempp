@@ -50,7 +50,7 @@ class RasterStatistics:
 
     def __repr__(self) -> str:
         """Return string representation of the statistics."""
-        return self.__str__()
+        return "RasterStatistics:\n" + self.__str__()
 
     def save(self, output_file: Path) -> None:
         """Save statistics to a JSON file."""
@@ -60,34 +60,39 @@ class RasterStatistics:
 
 
 def compute_raster_statistics(
-    raster: xdem.DEM | np.ma.MaskedArray,
-    mask: gu.Mask | np.ma.MaskedArray | None = None,
+    raster: xdem.DEM | gu.Raster,
+    inlier_mask: gu.Mask | None = None,
     output_file: Path | None = None,
-) -> dict[str, float]:
+) -> RasterStatistics:
     """Compute statistics for a raster.
     Args:
-        raster (xdem.DEM | np.ma.MaskedArray): DEM raster or masked array.
+        raster (xdem.DEM | | gu.Raster | np.ma.MaskedArray | np.ndarray): DEM raster or masked array.
         mask (gu.Mask | None, optional): Inlier mask where statistics are to be computed.
         output_file (Path | None, optional): Path to save statistics JSON file.
 
     Returns:
         RasterStatistics: Container with computed statistics.
     """
-    if isinstance(raster, xdem.DEM):
-        raster = raster.data
-    elif not isinstance(raster, np.ma.MaskedArray):
-        raise TypeError("Input raster must be a masked array or xdem.DEM object.")
+    # Convert raster to masked array if necessary
+    if not isinstance(raster, (xdem.DEM | gu.Raster)):
+        raise TypeError("Input raster must be a xdem.DEM or gu.Raster object")
 
-    if isinstance(mask, gu.Mask):
-        mask = mask.data
-    elif not isinstance(mask, np.ma.MaskedArray):
-        logger.warning("Invalid mask provided. Using all pixels.")
-        mask = None
-    if mask is None:
-        mask = np.ones_like(raster, dtype=bool)
+    # Apply inlier mask if provided (otherwise keep only valid pixels in raster)
+    if inlier_mask is not None:
+        if not isinstance(inlier_mask, gu.Mask):
+            raise TypeError("Inlier mask must be a geoutils.Mask object.")
+
+        # Compute the number of empty cells and percentage of valid cells
+        _, _, valid_cells_perc = compute_area_in_mask(raster, inlier_mask)
+
+        array = raster.data[inlier_mask.data].compressed()
+    else:
+        logger.info("No inlier mask provided. Using all valid pixels.")
+        array = raster.data.compressed()
+        valid_cells_perc = -1
 
     # Convert masked array to Dask array
-    raster_dask = da.from_array(raster[mask].compressed(), chunks="auto")
+    raster_dask = da.from_array(array, chunks="auto")
 
     # Compute statistics in parallel
     mean = da.mean(raster_dask)
@@ -97,11 +102,6 @@ def compute_raster_statistics(
     percentile25 = da.percentile(raster_dask, 25)
     median = da.percentile(raster_dask, 50)
     percentile75 = da.percentile(raster_dask, 75)
-
-    # Compute the number of empty cells and percentage of valid cells
-    empty_cells = raster.mask.sum()
-    total_cells = raster.size
-    valid_cells_percentage = (1 - empty_cells / total_cells) * 100
 
     # Compute the statistics
     stats = RasterStatistics(
@@ -113,13 +113,188 @@ def compute_raster_statistics(
         median=median.compute()[0],
         percentile75=percentile75.compute()[0],
         nmad=xdem.spatialstats.nmad(raster_dask),
-        valid_percentage=round(valid_cells_percentage, 2),
+        valid_percentage=round(valid_cells_perc, 2),
     )
 
     if output_file is not None:
         stats.save(output_file)
 
     return stats
+
+
+def compute_area_in_vector(
+    raster: xdem.DEM | gu.Raster, vector: gu.Vector
+) -> tuple[int, float, float]:
+    """Compute the number of valid pixels in a raster within a given vector object.
+
+    Args:
+        raster (gu.Raster): Raster object.
+        polygon (gu.Vector): Vector object containing one or multiple polygons.
+
+    Returns:
+        tuple[int, float, float]: Tuple containing:
+            - pixels: Number of valid pixels in raster within polygon.
+            - area: Area of valid pixels in unit of raster resolution (usually m2).
+            - percentage: Percentage of valid pixels in the polygon.
+
+    """
+    if not isinstance(raster, (xdem.DEM | gu.Raster)):
+        raise TypeError("Input raster must be a xdem.DEM or gu.Raster object")
+    if not isinstance(vector, gu.Vector):
+        raise TypeError("Input vector must be a geoutils.Vector object")
+
+    mask = vector.create_mask(raster)
+    return compute_area_in_mask(raster, inlier_mask=mask)
+
+
+def compute_area_in_mask(
+    raster: xdem.DEM | gu.Raster, inlier_mask: gu.Mask
+) -> tuple[int, float, float]:
+    """Compute the number of valid pixels in a raster within a given mask.
+    Args:
+        raster (xdem.DEM | gu.Raster): Raster object.
+        inlier_mask (gu.Mask): Mask object containing valid pixels.
+    Returns:
+        tuple[int, float, float]: Tuple containing:
+            - pixels: Number of valid pixels in raster within mask.
+            - area: Area of valid pixels in unit of raster resolution (usually m2).
+            - percentage: Percentage of valid pixels in the mask.
+    """
+
+    # # Create sample data to test this function
+    # import numpy as np
+    # import pyproj
+    # import rasterio as rio
+
+    # np.random.seed(42)
+    # arr = np.random.randint(0, 255, size=(5, 5), dtype="uint8")
+    # raster_mask = np.random.randint(0, 2, size=(5, 5), dtype="bool")
+    # ma = np.ma.masked_array(data=arr, mask=raster_mask)
+
+    # # Create a raster from array
+    # raster = gu.Raster.from_array(
+    #     data=ma,
+    #     transform=rio.transform.from_bounds(0, 0, 1, 1, 3, 3),
+    #     crs=pyproj.CRS.from_epsg(4326),
+    #     nodata=255,
+    # )
+
+    # inlier_mask = gu.Mask.from_array(
+    #     data=np.array(
+    #         [
+    #             [1, 1, 1, 0, 0],
+    #             [1, 1, 1, 0, 0],
+    #             [0, 0, 0, 0, 0],
+    #             [0, 0, 0, 0, 0],
+    #             [0, 0, 0, 0, 0],
+    #         ]
+    #     ),
+    #     transform=rio.transform.from_bounds(0, 0, 1, 1, 3, 3),
+    #     crs=pyproj.CRS.from_epsg(4326),
+    # )
+    if not isinstance(raster, (xdem.DEM | gu.Raster)):
+        raise TypeError("Input raster must be a xdem.DEM or gu.Raster object")
+    if not isinstance(inlier_mask, gu.Mask):
+        raise TypeError("Input mask must be a geoutils.Mask object")
+
+    # Reproject mask to raster CRS
+    if inlier_mask.transform != raster.transform:
+        inlier_mask = inlier_mask.reproject(raster)
+
+    # Get a boolean mask of valid pixels that are within the polygon
+    msk = ~raster.data.mask & inlier_mask.data
+
+    # Count valid (non-masked) pixels and percentage
+    pixels = msk.data.sum()
+    total_mask_pixels = inlier_mask.data.sum()
+    percentage = pixels / total_mask_pixels
+
+    # Convert in metric units
+    area = pixels * raster.res[0] * raster.res[1]
+
+    return pixels, area, percentage
+
+
+def compute_glaciers_in_footprint(
+    raster: Path | str | gu.Raster,
+    polygon: Path | str | gu.Vector,
+    satellite_footprint: Path | str | gu.Vector = None,
+) -> tuple[int, float, float]:
+    """Count number of valid pixels in raster within given polygon.
+
+    Args:
+        raster (Path | str | gu.Raster): Path to raster file or geoutils.Raster object.
+        polygon (Path | str | gu.Vector): Path to vector file or geoutils.Vector object.
+        satellite_footprint (Path | str | gu.Vector, optional): Path to satellite footprint file or geoutils.Vector object. Defaults to None.
+
+    Returns:
+        tuple[int, float, float]: Tuple containing:
+            - valid_pixels: Number of valid pixels in raster within polygon.
+            - valid_area_m2: Area of valid pixels in square meters.
+            - valid_area_perc: Percentage of valid pixels in the polygon.
+    """
+    import warnings
+
+    warnings.warn(
+        "compute_glaciers_in_footprint may not be updated. Use carefully",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+
+    # Load data if paths provided
+    if isinstance(raster, Path | str):
+        if not Path(raster).exists():
+            raise FileNotFoundError(f"Raster file not found: {raster}")
+        raster = gu.Raster(raster)
+    if isinstance(polygon, Path | str):
+        if not Path(polygon).exists():
+            raise FileNotFoundError(f"Polygon file not found: {polygon}")
+        polygon = gu.Vector(polygon)
+    if satellite_footprint is not None:
+        if isinstance(satellite_footprint, (Path | str)):
+            if not Path(satellite_footprint).exists():
+                raise FileNotFoundError(
+                    f"Satellite footprint file not found: {satellite_footprint}"
+                )
+            satellite_footprint = gu.Vector(satellite_footprint)
+        else:
+            logger.warning("Invalid satellite footprint provided. Using raster extent.")
+            satellite_footprint = None
+
+    # Reproject polygon to raster CRS
+    polygon = polygon.reproject(crs=raster.crs)
+
+    # Intersect polygon with satellite footprint if provided, else crop to raster extent
+    if satellite_footprint is not None:
+
+        def extract_glaciers_in_footprint(glacier_gdf, footprint_gdf):
+            # Ensure same CRS
+            if glacier_gdf.crs != footprint_gdf.crs:
+                footprint_gdf = footprint_gdf.to_crs(glacier_gdf.crs)
+
+            # Get footprint polygon (assuming single polygon in footprint_gdf)
+            footprint = footprint_gdf.geometry.iloc[0]
+
+            # Find intersecting glaciers
+            intersecting_glaciers = glacier_gdf[glacier_gdf.intersects(footprint)]
+
+            # Get actual intersection geometry
+            intersected_glaciers = gpd.overlay(
+                intersecting_glaciers, footprint_gdf, how="intersection"
+            )
+
+            return intersected_glaciers
+
+        satellite_footprint = satellite_footprint.reproject(crs=raster.crs)
+        polygon_ds = extract_glaciers_in_footprint(polygon.ds, satellite_footprint.ds)
+        polygon = gu.Vector(polygon_ds)
+    else:
+        logger.info("No satellite footprint provided. Using the raster extent.")
+        polygon = polygon.crop(raster, clip=True)
+
+    valid_px, valid_area, valid_area_perc = compute_area_in_vector(raster, polygon)
+
+    return valid_px, valid_area, valid_area_perc
 
 
 def plot_raster_statistics(
@@ -324,134 +499,3 @@ def load_stats_from_file(input_file: Path) -> RasterStatistics:
     loaded_stats = {key: float(value) for key, value in loaded_stats.items()}
 
     return RasterStatistics.from_dict(loaded_stats)
-
-
-def compute_valid_pixel_in_polygon(
-    raster: Path | str | gu.Raster,
-    polygon: Path | str | gu.Vector,
-) -> tuple[int, float, float]:
-    """
-    Count valid pixels in a raster within a given polygon.
-
-    Args:
-        raster (Path | str | gu.Raster): Path to raster file or geoutils.Raster object.
-        polygon (Path | str | gu.Vector): Path to vector file or geoutils.Vector object.
-
-    Returns:
-        tuple[int, float, float]: Tuple containing:
-            - valid_pixels: Number of valid pixels in raster within polygon.
-            - valid_area_m2: Area of valid pixels in square meters.
-            - valid_area_perc: Percentage of valid pixels in the
-    """
-    if isinstance(raster, Path | str):
-        if not Path(raster).exists():
-            raise FileNotFoundError(f"Raster file not found: {raster}")
-        raster = gu.Raster(raster)
-    if isinstance(polygon, Path | str):
-        if not Path(polygon).exists():
-            raise FileNotFoundError(f"Polygon file not found: {polygon}")
-        polygon = gu.Vector(polygon)
-
-    if not isinstance(raster, gu.Raster):
-        raise TypeError("Invalid raster provided.")
-    if not isinstance(polygon, gu.Vector):
-        raise TypeError("Invalid polygon provided.")
-
-    # Reproject polygon to raster CRS
-    polygon = polygon.reproject(crs=raster.crs)
-
-    # Create binary mask from polygon
-    mask = polygon.create_mask(raster)
-
-    # Count valid (non-masked) pixels
-    valid_pixels = mask.data.sum()
-
-    # Convert in metric unit
-    try:
-        valid_area_m2 = valid_pixels * raster.res[0] * raster.res[1]
-
-        # Compute the percentage of valid pixels in the polygon
-        valid_area_perc = valid_area_m2 / polygon.area.sum()
-
-    except AttributeError:
-        logger.warning("Could not compute valid area")
-        valid_area_m2 = -1
-        valid_area_perc = -1
-
-    return valid_pixels, valid_area_m2, valid_area_perc
-
-
-def compute_glaciers_in_footprint(
-    raster: Path | str | gu.Raster,
-    polygon: Path | str | gu.Vector,
-    satellite_footprint: Path | str | gu.Vector = None,
-) -> tuple[int, float, float]:
-    """Count number of valid pixels in raster within given polygon.
-
-    Args:
-        raster (Path | str | gu.Raster): Path to raster file or geoutils.Raster object.
-        polygon (Path | str | gu.Vector): Path to vector file or geoutils.Vector object.
-        satellite_footprint (Path | str | gu.Vector, optional): Path to satellite footprint file or geoutils.Vector object. Defaults to None.
-
-    Returns:
-        tuple[int, float, float]: Tuple containing:
-            - valid_pixels: Number of valid pixels in raster within polygon.
-            - valid_area_m2: Area of valid pixels in square meters.
-            - valid_area_perc: Percentage of valid pixels in the polygon.
-    """
-    # Load data if paths provided
-    if isinstance(raster, Path | str):
-        if not Path(raster).exists():
-            raise FileNotFoundError(f"Raster file not found: {raster}")
-        raster = gu.Raster(raster)
-    if isinstance(polygon, Path | str):
-        if not Path(polygon).exists():
-            raise FileNotFoundError(f"Polygon file not found: {polygon}")
-        polygon = gu.Vector(polygon)
-    if satellite_footprint is not None:
-        if isinstance(satellite_footprint, (Path | str)):
-            if not Path(satellite_footprint).exists():
-                raise FileNotFoundError(
-                    f"Satellite footprint file not found: {satellite_footprint}"
-                )
-            satellite_footprint = gu.Vector(satellite_footprint)
-        else:
-            logger.warning("Invalid satellite footprint provided. Using raster extent.")
-            satellite_footprint = None
-
-    # Reproject polygon to raster CRS
-    polygon = polygon.reproject(crs=raster.crs)
-
-    # Intersect polygon with satellite footprint if provided, else crop to raster extent
-    if satellite_footprint is not None:
-
-        def extract_glaciers_in_footprint(glacier_gdf, footprint_gdf):
-            # Ensure same CRS
-            if glacier_gdf.crs != footprint_gdf.crs:
-                footprint_gdf = footprint_gdf.to_crs(glacier_gdf.crs)
-
-            # Get footprint polygon (assuming single polygon in footprint_gdf)
-            footprint = footprint_gdf.geometry.iloc[0]
-
-            # Find intersecting glaciers
-            intersecting_glaciers = glacier_gdf[glacier_gdf.intersects(footprint)]
-
-            # Get actual intersection geometry
-            intersected_glaciers = gpd.overlay(
-                intersecting_glaciers, footprint_gdf, how="intersection"
-            )
-
-            return intersected_glaciers
-
-        satellite_footprint = satellite_footprint.reproject(crs=raster.crs)
-        polygon_ds = extract_glaciers_in_footprint(polygon.ds, satellite_footprint.ds)
-        polygon = gu.Vector(polygon_ds)
-    else:
-        logger.info("No satellite footprint provided. Using the raster extent.")
-        polygon = polygon.crop(raster, clip=True)
-
-    valid_pixels, valid_area_m2, valid_area_perc = compute_valid_pixel_in_polygon(
-        raster, polygon
-    )
-
-    return valid_pixels, valid_area_m2, valid_area_perc

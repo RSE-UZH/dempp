@@ -3,10 +3,11 @@ from pathlib import Path
 
 # Import submodules
 from . import (
+    dod,  # noqa
     elevation_bands,  # noqa
     # filter,  # noqa
     io,  # noqa
-    raster_statistics,  # noqa
+    statistics,  # noqa
     utils,  # noqa
 )
 

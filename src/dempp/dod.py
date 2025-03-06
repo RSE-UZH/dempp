@@ -7,7 +7,7 @@ import numpy as np
 import xdem
 
 from dempp.io import load_dem
-from dempp.raster_statistics import (
+from dempp.statistics import (
     RasterStatistics,
     compute_raster_statistics,
     plot_raster_statistics,
@@ -86,47 +86,10 @@ def apply_mask(
     return dem[mask_warped]
 
 
-def save_outputs(
-    dod: xdem.DEM,
-    stats: RasterStatistics,
-    output_dir: Path,
-    output_prefix: str,
-) -> dict[str, Path]:
-    """Save DoD outputs to files.
-
-    Args:
-        dod: The difference DEM
-        stats: Statistics for the difference DEM
-        output_dir: Directory to save outputs
-        output_prefix: Prefix for output filenames
-
-    Returns:
-        Dictionary of output file paths
-    """
-    output_dir = Path(output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    outputs = {}
-
-    # Save difference DEM
-    dod_path = output_dir / f"{output_prefix}_dod.tif"
-    dod.save(dod_path)
-    outputs["dod"] = dod_path
-    logger.info(f"Saved difference DEM to: {dod_path}")
-
-    # Save statistics
-    stats_path = output_dir / f"{output_prefix}_stats.json"
-    stats.save(stats_path)
-    outputs["stats"] = stats_path
-    logger.info(f"Saved statistics to: {stats_path}")
-
-    return outputs
-
-
 def process_dod(
     dem: Path | str,
     reference: Path | str,
-    mask: Path | str | None = None,
+    inlier_mask: Path | str | None = None,
     output_dir: Path | str | None = None,
     output_prefix: str | None = None,
     make_plot: bool = False,
@@ -134,7 +97,7 @@ def process_dod(
     resampling: str = "bilinear",
     xlim: tuple[float, float] | None = None,
     plt_cfg: dict[str, Any] | None = None,
-) -> tuple[xdem.DEM, RasterStatistics, dict[str, Path] | None]:
+) -> tuple[xdem.DEM, RasterStatistics]:
     """Process two DEMs to create a difference DEM with statistics.
 
     This high-level function performs the complete DoD workflow by calling several
@@ -160,50 +123,40 @@ def process_dod(
         plt_cfg: Optional plotting configuration
 
     Returns:
-        Tuple of (difference DEM, statistics, output paths dict or None)
+        tuple[xdem.DEM, RasterStatistics]: The difference DEM and statistics object
     """
     # Load DEMs from paths
-    dem_obj = load_dem(dem)
-    reference_obj = load_dem(reference)
+    dem = load_dem(dem)
+    reference = load_dem(reference)
 
     # Load mask if provided
-    mask_obj = gu.Mask(mask).reproject(reference_obj) if mask is not None else None
-
-    # Convert paths to Path objects for consistency
-    if output_dir is not None:
-        output_dir = Path(output_dir)
-
-    # Determine output prefix if not provided
-    if output_dir is not None and output_prefix is None:
-        try:
-            output_prefix = Path(dem).stem
-        except (AttributeError, TypeError):
-            logger.warning("Unable to get DEM filename. Using default name")
-            output_prefix = "dod"
+    mask = (
+        gu.Mask(inlier_mask).reproject(reference) if inlier_mask is not None else None
+    )
 
     # Compute DoD
-    dod = compute_dod(dem_obj, reference_obj, warp_on=warp_on, resampling=resampling)
+    dod = compute_dod(dem, reference, warp_on=warp_on, resampling=resampling)
     logger.info("Computed difference between DEMs")
 
     # Compute statistics
-    stats = compute_raster_statistics(raster=dod, mask=mask_obj)
+    stats = compute_raster_statistics(raster=dod, inlier_mask=mask)
     logger.info("Computed statistics for difference DEM")
 
     # Save outputs if requested
-    outputs = None
     if output_dir is not None:
-        outputs = save_outputs(
-            dod=dod,
-            stats=stats,
-            output_dir=output_dir,
-            output_prefix=output_prefix,
-        )
-        logger.info(f"Saved outputs to {output_dir}")
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        if output_prefix is None:
+            output_prefix = f"{Path(dem.name).stem}__{Path(reference.name).stem}"
+
+        # Save difference DEM and statistics
+        stats.save(output_dir / f"{output_prefix}_stats.json")
+        dod.save(output_dir / f"{output_prefix}_dod.tif")
+        logger.info(f"Saved difference DEM and statistics to: {output_dir}")
 
         # Generate plot if requested
         if make_plot:
-            # Apply mask if provided
-            plot_data = apply_mask(dod, mask_obj) if mask_obj is not None else dod.data
+            plot_data = apply_mask(dod, mask) if mask is not None else dod.data
             plot_path = output_dir / f"{output_prefix}_plot.png"
             plt_cfg = plt_cfg or {}
             plot_raster_statistics(
@@ -213,10 +166,9 @@ def process_dod(
                 xlim=xlim,
                 **plt_cfg,
             )
-            outputs["plot"] = plot_path
             logger.info(f"Saved plot to: {plot_path}")
 
-    return dod, stats, outputs
+    return dod, stats
 
 
 if __name__ == "__main__":

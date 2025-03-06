@@ -13,7 +13,7 @@ from dempp.dod import (
     process_dod,
     save_outputs,
 )
-from dempp.raster_statistics import RasterStatistics
+from dempp.statistics import RasterStatistics
 
 
 @pytest.fixture

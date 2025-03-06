@@ -109,7 +109,8 @@ def load_dems(
 def save_dem(
     dem: xdem.DEM,
     save_path: Path,
-    dtype: str | np.dtype = "float32",
+    *,
+    dtype: str | np.dtype = None,
     compress: str = "LZW",
     **kwargs: Any,
 ) -> None:
@@ -118,14 +119,14 @@ def save_dem(
     Args:
         dem: DEM object to save
         save_path: Path where to save the DEM
-        dtype: Data type for the saved DEM
-        compress: Compression method to use
+        dtype: Data type for the saved DEM. If None, use the original dtype
+        compress: Compression method to use. Defaults to 'LZW'
         **kwargs: Additional arguments passed to xdem.DEM.save()
     """
-    if not save_path.parent.exists():
-        save_path.parent.mkdir(parents=True)
+    save_path = check_path(save_path, "Save path")
+    save_path.parent.mkdir(parents=True, exist_ok=True)
 
-    if dem.data.dtype == "float64":
+    if dtype is not None:
         dem = dem.astype(dtype)
 
     dem.save(save_path, dtype=dtype, compress=compress, **kwargs)
