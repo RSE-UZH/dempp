@@ -47,7 +47,6 @@ def compute_dod(
 
     # Reprojection is needed
     logger.info("Reprojecting DEMs (different CRS or dimensions)")
-
     if warp_on == "reference":
         logger.debug("Reprojecting DEM to match reference")
         aligned_dem = dem.reproject(reference, resampling=resampling)
@@ -62,16 +61,16 @@ def compute_dod(
 
 def apply_mask(
     dem: xdem.DEM,
-    mask: gu.Mask,
-) -> np.ma.MaskedArray:
-    """Apply a mask to a difference DEM.
+    inlier_mask: gu.Mask,
+) -> xdem.DEM:
+    """Apply an inlier mask to a DEM. Returns the DEM with the same shape as the original DEM.
 
     Args:
         dem: The difference DEM to mask
-        mask: A geoutils Mask object
+        mask: A geoutils Mask object containing the inlier mask
 
     Returns:
-        Masked array with the difference data
+        xdem.DEM: The masked DEM
 
     Raises:
         ValueError: If input DEM is not an xdem.DEM object or mask is not a geoutils.Mask object
@@ -79,11 +78,15 @@ def apply_mask(
     if not isinstance(dem, xdem.DEM):
         raise ValueError("DEM must be an xdem.DEM object")
 
-    if not isinstance(mask, gu.Mask):
+    if not isinstance(inlier_mask, gu.Mask):
         raise ValueError("Mask must be a Path or geoutils.Mask object")
 
-    mask_warped = mask.reproject(dem)
-    return dem[mask_warped]
+    if inlier_mask.transform != dem.transform:
+        inlier_mask = inlier_mask.reproject(dem)
+
+    dem.set_mask(~inlier_mask)
+
+    return dem
 
 
 def process_dod(
@@ -130,9 +133,9 @@ def process_dod(
     reference = load_dem(reference)
 
     # Load mask if provided
-    mask = (
-        gu.Mask(inlier_mask).reproject(reference) if inlier_mask is not None else None
-    )
+    mask = gu.Mask(inlier_mask) if inlier_mask else None
+    if mask is not None and mask.transform != reference.transform:
+        mask = mask.reproject(reference)
 
     # Compute DoD
     dod = compute_dod(dem, reference, warp_on=warp_on, resampling=resampling)

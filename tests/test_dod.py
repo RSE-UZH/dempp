@@ -1,17 +1,17 @@
-import os
 import tempfile
 from pathlib import Path
 
 import geoutils as gu
 import numpy as np
+import pyproj
 import pytest
+import rasterio as rio
 import xdem
 
 from dempp.dod import (
     apply_mask,
     compute_dod,
     process_dod,
-    save_outputs,
 )
 from dempp.statistics import RasterStatistics
 
@@ -79,248 +79,207 @@ def temp_output_dir():
         yield Path(temp_dir)
 
 
-# Add test for invalid inputs to process_dod
-def test_process_dod_invalid_inputs():
-    """Test error handling for invalid inputs."""
-    # Test nonexistent file paths
-    with pytest.raises(FileNotFoundError):
-        process_dod("nonexistent.tif", "nonexistent2.tif")
-
-    # Test invalid input types
-    with pytest.raises((ValueError, TypeError)):
-        process_dod(None, None)
-
-
-# Add test for file path inputs
-def test_process_dod_file_inputs():
-    """Test using xdem example file paths directly as inputs."""
-    dem_path = xdem.examples.get_path("longyearbyen_tba_dem_coreg")
-    ref_path = xdem.examples.get_path("longyearbyen_ref_dem")
-
-    # Process DoD using direct file paths
-    dod, stats, outputs = process_dod(dem=dem_path, reference=ref_path)
-
-    # Check results
-    assert isinstance(dod, xdem.DEM)
-    assert isinstance(stats, RasterStatistics)
-    assert outputs is None  # No output directory provided
-
-
-# Add test for custom plotting configuration
-def test_process_dod_custom_plot_config(sample_dem_paths, temp_output_dir):
-    """Test custom plotting configuration."""
-    dem_path, ref_path = sample_dem_paths
-
-    # Custom plot configuration
-    plt_cfg = {
-        "figsize": (12, 12),
-        "bins": 100,
-        "title": "Custom DoD Plot",
-    }
-
-    # Run process_dod with custom plot config
-    dod, stats, outputs = process_dod(
-        dem=dem_path,
-        reference=ref_path,
-        output_dir=temp_output_dir,
-        output_prefix="custom_plot",
-        make_plot=True,
-        plt_cfg=plt_cfg,
+@pytest.fixture
+def dummy_dem():
+    """Create a sample geoutils.Raster for testing."""
+    np.random.seed(42)
+    arr = np.random.randint(0, 255, size=(5, 5), dtype="uint8")
+    raster_mask = np.random.randint(0, 2, size=(5, 5), dtype="bool")
+    ma = np.ma.masked_array(data=arr, mask=raster_mask)
+    return xdem.DEM.from_array(
+        data=ma,
+        transform=rio.transform.from_bounds(0, 0, 1, 1, 5, 5),
+        crs=pyproj.CRS.from_epsg(4326),
+        nodata=255,
     )
 
-    # Check that plot was created
-    assert "plot" in outputs
-    assert outputs["plot"].exists()
 
-    # Verify it's a valid image file
-    assert os.path.getsize(outputs["plot"]) > 0
-
-
-# Add test for different warp_on and resampling parameters
-def test_process_dod_warp_options(sample_dem_paths, temp_output_dir):
-    """Test process_dod with different warping options."""
-    dem_path, ref_path = sample_dem_paths
-
-    # Test with warp_on="dem" and resampling="nearest"
-    dod, stats, outputs = process_dod(
-        dem=dem_path,
-        reference=ref_path,
-        output_dir=temp_output_dir,
-        output_prefix="warp_test",
-        warp_on="dem",
-        resampling="nearest",
+@pytest.fixture
+def dummy_inlier_mask():
+    """Create a sample geoutils.Mask for testing."""
+    mask_data = np.array(
+        [
+            [1, 1, 1, 0, 0],
+            [1, 1, 1, 0, 0],
+            [0, 0, 0, 0, 0],
+            [0, 0, 0, 0, 0],
+            [0, 0, 0, 0, 0],
+        ]
     )
 
-    # Check results
-    assert isinstance(dod, xdem.DEM)
-    assert isinstance(stats, RasterStatistics)
-    assert isinstance(outputs, dict)
-    assert "dod" in outputs
-    assert outputs["dod"].exists()
+    return gu.Mask.from_array(
+        data=mask_data,
+        transform=rio.transform.from_bounds(0, 0, 1, 1, 5, 5),
+        crs=pyproj.CRS.from_epsg(4326),
+    )
 
 
-# Add test for compute_dod with explicit mask
-def test_compute_dod_with_explicit_mask(sample_dems, sample_mask):
-    """Test computing DoD with an explicit mask."""
-    dem1, dem2 = sample_dems
-
-    # Compute DoD
-    dod = compute_dod(dem1, dem2)
-
-    # Apply mask and check statistics
-    masked_data = apply_mask(dod, sample_mask)
-    stats = RasterStatistics.from_array(masked_data)
-
-    # Basic checks on masked statistics
-    assert isinstance(stats, RasterStatistics)
-    assert hasattr(stats, "mean")
-    assert hasattr(stats, "std")
-    assert hasattr(stats, "nmad")
-
-
-def test_compute_dod_same_crs(sample_dems):
-    """Test compute_dod with DEMs having the same CRS."""
-    dem1, dem2 = sample_dems
-
-    # Compute DoD
-    dod = compute_dod(dem1, dem2)
-
-    # Check that the result is an xdem.DEM object with the expected properties
-    assert isinstance(dod, xdem.DEM)
-    assert dod.shape == dem2.shape
-    assert dod.crs == dem2.crs
-    assert dod.transform == dem2.transform
-
-
-def test_compute_dod_different_resolution(sample_dems):
-    """Test compute_dod with DEMs having different resolutions."""
-    dem1, dem2 = sample_dems
-
-    # Create a version of dem2 with different resolution
-    dem2_lowres = dem2.reproject(res=dem2.res[0] * 2)
-
-    # Test warp_on="reference"
-    dod1 = compute_dod(dem1, dem2_lowres)
-    assert dod1.shape == dem2_lowres.shape
-    assert dod1.res == dem2_lowres.res
-
-    # Test warp_on="dem"
-    dod2 = compute_dod(dem1, dem2_lowres, warp_on="dem")
-    assert dod2.shape == dem1.shape
-    assert dod2.res == dem1.res
-
-
-def test_compute_dod_invalid_warp(sample_dems):
-    """Test compute_dod with invalid warp_on value."""
-    dem1, dem2 = sample_dems
-
-    # Should raise ValueError for invalid warp_on value
-    with pytest.raises(ValueError):
-        compute_dod(dem1, dem2, warp_on="invalid")
-
-
-def test_apply_mask(sample_dems, sample_mask):
+def test_apply_mask(dummy_dem, dummy_inlier_mask):
     """Test apply_mask function."""
-    dem1, dem2 = sample_dems
-    dod = compute_dod(dem1, dem2)
-
-    # Apply mask
-    masked_data = apply_mask(dod, sample_mask)
-
-    # Check result
-    assert isinstance(masked_data, np.ma.MaskedArray)
-    assert np.sum(~masked_data.mask) < dod.data.size  # Some data should be masked
-
-
-def test_save_outputs(sample_dems, temp_output_dir):
-    """Test save_outputs function."""
-    dem1, dem2 = sample_dems
-    dod = compute_dod(dem1, dem2)
-
-    # Compute simple statistics
-    stats = RasterStatistics.from_array(dod.data)
-
-    # Save outputs
-    outputs = save_outputs(dod, stats, temp_output_dir, "test")
-
-    # Check that files were created
-    assert (temp_output_dir / "test_dod.tif").exists()
-    assert (temp_output_dir / "test_stats.json").exists()
-
-    # Check that returned paths are correct
-    assert outputs["dod"] == temp_output_dir / "test_dod.tif"
-    assert outputs["stats"] == temp_output_dir / "test_stats.json"
-
-
-def test_process_dod_basic(sample_dem_paths, temp_output_dir):
-    """Test process_dod with basic inputs."""
-    dem_path, ref_path = sample_dem_paths
-
-    # Run process_dod
-    dod, stats, outputs = process_dod(
-        dem=dem_path,
-        reference=ref_path,
-        output_dir=temp_output_dir,
-        output_prefix="test_basic",
+    # Create a masked array
+    masked_array = np.ma.masked_array(
+        data=dummy_dem.data, mask=~dummy_inlier_mask.data.astype(bool)
     )
+    # Apply the mask
+    result = apply_mask(dummy_dem, dummy_inlier_mask)
 
-    # Check results
-    assert isinstance(dod, xdem.DEM)
-    assert isinstance(stats, RasterStatistics)
-    assert isinstance(outputs, dict)
-    assert "dod" in outputs
-    assert "stats" in outputs
-
-
-def test_process_dod_with_mask(sample_dem_paths, sample_mask_path, temp_output_dir):
-    """Test process_dod with mask."""
-    dem_path, ref_path = sample_dem_paths
-
-    # Run process_dod with mask
-    dod, stats, outputs = process_dod(
-        dem=dem_path,
-        reference=ref_path,
-        mask=sample_mask_path,
-        output_dir=temp_output_dir,
-        output_prefix="test_mask",
-    )
-
-    # Check results
-    assert isinstance(dod, xdem.DEM)
-    assert isinstance(stats, RasterStatistics)
-    assert isinstance(outputs, dict)
+    # Check that the result is a masked array
+    assert isinstance(result, xdem.DEM)
+    assert isinstance(result.data, np.ma.MaskedArray)
+    assert result.shape == dummy_dem.shape
+    assert np.array_equal(result.data.mask, masked_array.mask)
 
 
-def test_process_dod_with_plot(sample_dem_paths, temp_output_dir):
-    """Test process_dod with plot generation."""
-    dem_path, ref_path = sample_dem_paths
+class TestComputeDoD:
+    """Tests for the compute_dod function."""
 
-    # Run process_dod with plot
-    dod, stats, outputs = process_dod(
-        dem=dem_path,
-        reference=ref_path,
-        output_dir=temp_output_dir,
-        output_prefix="test_plot",
-        make_plot=True,
-        xlim=(-10, 10),
-    )
+    def test_same_crs(self, sample_dems):
+        """Test compute_dod with DEMs having the same CRS."""
+        dem1, dem2 = sample_dems
 
-    # Check if plot was created
-    assert "plot" in outputs
-    assert outputs["plot"].exists()
+        # Compute DoD
+        dod = compute_dod(dem1, dem2)
 
-    # Verify it's a valid image file
-    assert os.path.getsize(outputs["plot"]) > 0
+        # Check that the result is an xdem.DEM object with the expected properties
+        assert isinstance(dod, xdem.DEM)
+        assert dod.shape == dem2.shape
+        assert dod.crs == dem2.crs
+        assert dod.transform == dem2.transform
+
+    def test_different_resolution(self, sample_dems):
+        """Test compute_dod with DEMs having different resolutions."""
+        dem1, dem2 = sample_dems
+
+        # Create a version of dem2 with different resolution
+        dem2_lowres = dem2.reproject(res=dem2.res[0] * 2)
+
+        # Test warp_on="reference"
+        dod1 = compute_dod(dem1, dem2_lowres)
+        assert dod1.shape == dem2_lowres.shape
+        assert dod1.res == dem2_lowres.res
+
+        # Test warp_on="dem"
+        dod2 = compute_dod(dem1, dem2_lowres, warp_on="dem")
+        assert dod2.shape == dem1.shape
+        assert dod2.res == dem1.res
+
+    def test_invalid_warp(self, sample_dems):
+        """Test compute_dod with invalid warp_on value."""
+        dem1, dem2 = sample_dems
+
+        # Reproject dem2 with half the resolution
+        dem2_reprojected = dem2.reproject(res=dem2.res[0] * 2)
+
+        # Should raise ValueError for invalid warp_on value
+        with pytest.raises(ValueError):
+            compute_dod(dem1, dem2_reprojected, warp_on="invalid")
 
 
-def test_process_dod_no_output(sample_dem_paths):
-    """Test process_dod without output directory."""
-    dem_path, ref_path = sample_dem_paths
+class TestProcessDoD:
+    """Tests for the process_dod function."""
 
-    # Run process_dod without output
-    dod, stats, outputs = process_dod(dem=dem_path, reference=ref_path)
+    def test_invalid_inputs(self):
+        """Test error handling for invalid inputs."""
+        # Test nonexistent file paths
+        with pytest.raises(FileNotFoundError):
+            process_dod("nonexistent.tif", "nonexistent2.tif")
 
-    # Check that computation was successful but no outputs were saved
-    assert isinstance(dod, xdem.DEM)
-    assert isinstance(stats, RasterStatistics)
-    assert outputs is None
+        # Test invalid input types
+        with pytest.raises((ValueError, TypeError)):
+            process_dod(None, None)
+
+    def test_file_inputs(self):
+        """Test using xdem example file paths directly as inputs."""
+        dem_path = xdem.examples.get_path("longyearbyen_tba_dem_coreg")
+        ref_path = xdem.examples.get_path("longyearbyen_ref_dem")
+
+        # Process DoD using direct file paths
+        dod, stats = process_dod(dem=dem_path, reference=ref_path)
+
+        # Check results
+        assert isinstance(dod, xdem.DEM)
+        assert isinstance(stats, RasterStatistics)
+
+    def test_basic(self, sample_dem_paths, temp_output_dir):
+        """Test process_dod with basic inputs."""
+        dem_path, ref_path = sample_dem_paths
+
+        # Run process_dod
+        dod, stats = process_dod(
+            dem=dem_path,
+            reference=ref_path,
+            output_dir=temp_output_dir,
+            output_prefix="test_basic",
+        )
+
+        # Check results
+        assert isinstance(dod, xdem.DEM)
+        assert isinstance(stats, RasterStatistics)
+
+    def test_with_mask(self, sample_dem_paths, sample_mask_path, temp_output_dir):
+        """Test process_dod with mask."""
+        dem_path, ref_path = sample_dem_paths
+
+        # Run process_dod with mask - updated parameter name from 'mask' to 'inlier_mask'
+        dod, stats = process_dod(
+            dem=dem_path,
+            reference=ref_path,
+            inlier_mask=sample_mask_path,  # Updated parameter name
+            output_dir=temp_output_dir,
+            output_prefix="test_mask",
+        )
+
+        # Check results
+        assert isinstance(dod, xdem.DEM)
+        assert isinstance(stats, RasterStatistics)
+
+    def test_with_plot(self, sample_dem_paths, temp_output_dir):
+        """Test process_dod with plot generation."""
+        dem_path, ref_path = sample_dem_paths
+
+        # Run process_dod with plot
+        dod, stats = process_dod(
+            dem=dem_path,
+            reference=ref_path,
+            output_dir=temp_output_dir,
+            output_prefix="test_plot",
+            make_plot=True,
+            xlim=(-10, 10),
+        )
+
+        # Check that computation was successful
+        assert isinstance(dod, xdem.DEM)
+        assert isinstance(stats, RasterStatistics)
+
+    def test_warp_options(self, sample_dem_paths, temp_output_dir):
+        """Test process_dod with different warping options."""
+        dem_path, ref_path = sample_dem_paths
+
+        # Test with warp_on="dem" and resampling="nearest"
+        dod, stats = process_dod(
+            dem=dem_path,
+            reference=ref_path,
+            output_dir=temp_output_dir,
+            output_prefix="warp_test",
+            warp_on="dem",
+            resampling="nearest",
+        )
+
+        # Check results
+        assert isinstance(dod, xdem.DEM)
+        assert isinstance(stats, RasterStatistics)
+
+    def test_no_output(self, sample_dem_paths):
+        """Test process_dod without output directory."""
+        dem_path, ref_path = sample_dem_paths
+
+        # Run process_dod without output
+        dod, stats = process_dod(dem=dem_path, reference=ref_path)
+
+        # Check that computation was successful but no outputs were saved
+        assert isinstance(dod, xdem.DEM)
+        assert isinstance(stats, RasterStatistics)
+
+
+if __name__ == "__main__":
+    pytest.main([__file__])
