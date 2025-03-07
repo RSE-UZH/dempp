@@ -11,7 +11,7 @@ import xdem
 from dempp.dod import (
     apply_mask,
     compute_dod,
-    process_dod,
+    differenciate_dems,
 )
 from dempp.statistics import RasterStatistics
 
@@ -176,17 +176,17 @@ class TestComputeDoD:
 
 
 class TestProcessDoD:
-    """Tests for the process_dod function."""
+    """Tests for the differenciate_dems function."""
 
     def test_invalid_inputs(self):
         """Test error handling for invalid inputs."""
         # Test nonexistent file paths
         with pytest.raises(FileNotFoundError):
-            process_dod("nonexistent.tif", "nonexistent2.tif")
+            differenciate_dems("nonexistent.tif", "nonexistent2.tif")
 
         # Test invalid input types
         with pytest.raises((ValueError, TypeError)):
-            process_dod(None, None)
+            differenciate_dems(None, None)
 
     def test_file_inputs(self):
         """Test using xdem example file paths directly as inputs."""
@@ -194,18 +194,18 @@ class TestProcessDoD:
         ref_path = xdem.examples.get_path("longyearbyen_ref_dem")
 
         # Process DoD using direct file paths
-        dod, stats = process_dod(dem=dem_path, reference=ref_path)
+        dod, stats = differenciate_dems(dem=dem_path, reference=ref_path)
 
         # Check results
         assert isinstance(dod, xdem.DEM)
         assert isinstance(stats, RasterStatistics)
 
     def test_basic(self, sample_dem_paths, temp_output_dir):
-        """Test process_dod with basic inputs."""
+        """Test differenciate_dems with basic inputs."""
         dem_path, ref_path = sample_dem_paths
 
-        # Run process_dod
-        dod, stats = process_dod(
+        # Run differenciate_dems
+        dod, stats = differenciate_dems(
             dem=dem_path,
             reference=ref_path,
             output_dir=temp_output_dir,
@@ -217,11 +217,11 @@ class TestProcessDoD:
         assert isinstance(stats, RasterStatistics)
 
     def test_with_mask(self, sample_dem_paths, sample_mask_path, temp_output_dir):
-        """Test process_dod with mask."""
+        """Test differenciate_dems with mask."""
         dem_path, ref_path = sample_dem_paths
 
-        # Run process_dod with mask - updated parameter name from 'mask' to 'inlier_mask'
-        dod, stats = process_dod(
+        # Run differenciate_dems with mask - updated parameter name from 'mask' to 'inlier_mask'
+        dod, stats = differenciate_dems(
             dem=dem_path,
             reference=ref_path,
             inlier_mask=sample_mask_path,  # Updated parameter name
@@ -234,11 +234,11 @@ class TestProcessDoD:
         assert isinstance(stats, RasterStatistics)
 
     def test_with_plot(self, sample_dem_paths, temp_output_dir):
-        """Test process_dod with plot generation."""
+        """Test differenciate_dems with plot generation."""
         dem_path, ref_path = sample_dem_paths
 
-        # Run process_dod with plot
-        dod, stats = process_dod(
+        # Run differenciate_dems with plot
+        dod, stats = differenciate_dems(
             dem=dem_path,
             reference=ref_path,
             output_dir=temp_output_dir,
@@ -252,11 +252,11 @@ class TestProcessDoD:
         assert isinstance(stats, RasterStatistics)
 
     def test_warp_options(self, sample_dem_paths, temp_output_dir):
-        """Test process_dod with different warping options."""
+        """Test differenciate_dems with different warping options."""
         dem_path, ref_path = sample_dem_paths
 
         # Test with warp_on="dem" and resampling="nearest"
-        dod, stats = process_dod(
+        dod, stats = differenciate_dems(
             dem=dem_path,
             reference=ref_path,
             output_dir=temp_output_dir,
@@ -270,11 +270,11 @@ class TestProcessDoD:
         assert isinstance(stats, RasterStatistics)
 
     def test_no_output(self, sample_dem_paths):
-        """Test process_dod without output directory."""
+        """Test differenciate_dems without output directory."""
         dem_path, ref_path = sample_dem_paths
 
-        # Run process_dod without output
-        dod, stats = process_dod(dem=dem_path, reference=ref_path)
+        # Run differenciate_dems without output
+        dod, stats = differenciate_dems(dem=dem_path, reference=ref_path)
 
         # Check that computation was successful but no outputs were saved
         assert isinstance(dod, xdem.DEM)

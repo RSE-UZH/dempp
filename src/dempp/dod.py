@@ -3,7 +3,6 @@ from pathlib import Path
 from typing import Any
 
 import geoutils as gu
-import numpy as np
 import xdem
 
 from dempp.io import load_dem
@@ -89,7 +88,7 @@ def apply_mask(
     return dem
 
 
-def process_dod(
+def differenciate_dems(
     dem: Path | str,
     reference: Path | str,
     inlier_mask: Path | str | None = None,
@@ -159,7 +158,7 @@ def process_dod(
 
         # Generate plot if requested
         if make_plot:
-            plot_data = apply_mask(dod, mask) if mask is not None else dod.data
+            plot_data = apply_mask(dod, mask).data if mask is not None else dod.data
             plot_path = output_dir / f"{output_prefix}_plot.png"
             plt_cfg = plt_cfg or {}
             plot_raster_statistics(
@@ -172,102 +171,3 @@ def process_dod(
             logger.info(f"Saved plot to: {plot_path}")
 
     return dod, stats
-
-
-if __name__ == "__main__":
-    import tempfile
-    from pathlib import Path
-
-    import geoutils as gu
-    import matplotlib.pyplot as plt
-    import numpy as np
-
-    print("Testing DoD functions with sample DEMs...")
-
-    # Load example DEMs from xdem
-    dem_2009 = xdem.DEM(xdem.examples.get_path("longyearbyen_ref_dem"))
-    dem_1990 = xdem.DEM(xdem.examples.get_path("longyearbyen_tba_dem_coreg"))
-
-    print("\n1. Basic DoD computation (same CRS):")
-    dod = compute_dod(dem_1990, dem_2009)
-    print(f"DoD shape: {dod.shape}, CRS: {dod.crs}")
-    print(f"Min: {dod.data.min():.2f}, Max: {dod.data.max():.2f}")
-
-    print("\n2. Testing different resolutions:")
-    # Create a low-res version of the 2009 DEM
-    dem_2009_lowres = dem_2009.reproject(res=dem_2009.res[0] * 2)
-    print(f"Original res: {dem_2009.res}, Low-res: {dem_2009_lowres.res}")
-
-    # Test with warp_on="reference" (default)
-    print("- Warping DEM to match reference:")
-    dod1 = compute_dod(dem_1990, dem_2009_lowres)
-    print(f"  DoD shape: {dod1.shape}, Resolution: {dod1.res}")
-
-    # Test with warp_on="dem"
-    print("- Warping reference to match DEM:")
-    dod2 = compute_dod(dem_1990, dem_2009_lowres, warp_on="dem")
-    print(f"  DoD shape: {dod2.shape}, Resolution: {dod2.res}")
-
-    print("\n3. Testing mask application:")
-    # Create a simple mask (e.g., central area of the DEM)
-    mask_array = np.zeros(dem_1990.shape, dtype=bool)
-    center_y, center_x = mask_array.shape[0] // 2, mask_array.shape[1] // 2
-    mask_size = min(mask_array.shape[0], mask_array.shape[1]) // 4
-    mask_array[
-        center_y - mask_size : center_y + mask_size,
-        center_x - mask_size : center_x + mask_size,
-    ] = True
-
-    # Create a mask with the same georeference as the DEM
-    mask = gu.Mask.from_array(
-        mask_array, transform=dem_1990.transform, crs=dem_1990.crs
-    )
-
-    # Apply mask to DoD
-    masked_dod = apply_mask(dod, mask)
-    print(f"Masked DoD: {masked_dod.count()} valid pixels out of {mask_array.size}")
-
-    print("\n4. Testing complete workflow with process_dod():")
-    # Create temporary directory for outputs
-    with tempfile.TemporaryDirectory() as temp_dir:
-        temp_path = Path(temp_dir)
-
-        # Save the sample DEMs and mask to temporary files
-        dem_path = temp_path / "dem_1990.tif"
-        ref_path = temp_path / "dem_2009.tif"
-        mask_path = temp_path / "mask.tif"
-
-        dem_1990.save(dem_path)
-        dem_2009.save(ref_path)
-        mask.save(mask_path)
-
-        # Process the DoDs using file paths
-        result_dod, result_stats, outputs = process_dod(
-            dem=dem_path,
-            reference=ref_path,
-            mask=mask_path,
-            output_dir=temp_path,
-            output_prefix="test",
-            make_plot=True,
-            xlim=(-10, 10),  # Set reasonable x-axis limits for the plot
-        )
-
-        print(f"Generated outputs in {temp_path}:")
-        for output_type, path in outputs.items():
-            print(f"- {output_type}: {path.name}")
-
-        print("\nStatistics:")
-        for key, value in result_stats.to_dict().items():
-            print(f"- {key}: {value:.3f}")
-
-        # Display the plot (only when running interactively)
-        if outputs and "plot" in outputs:
-            plt.figure(figsize=(10, 8))
-            img = plt.imread(outputs["plot"])
-            plt.imshow(img)
-            plt.axis("off")
-            plt.title("Generated DoD Plot")
-            plt.tight_layout()
-            plt.show()
-
-    print("\nAll tests completed successfully!")

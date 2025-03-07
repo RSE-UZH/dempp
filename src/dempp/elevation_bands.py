@@ -19,11 +19,11 @@ logger = logging.getLogger("dempp")
 
 @dataclass(kw_only=True)
 class Band:
-    lower: float = field(default=None)
-    upper: float = field(default=None)
-    width: float = field(default=None)
-    center: float = field(default=None)
-    mask: np.ndarray = field(default=None, repr=False)
+    lower: float | None = None
+    upper: float | None = None
+    width: float | None = None
+    center: float | None = None
+    mask: np.ndarray | None = field(default=None, repr=False)
 
     def __post_init__(self):
         if self.lower is not None and self.upper is not None:
@@ -373,6 +373,52 @@ def extract_elevation_bands(
 
 
 if __name__ == "__main__":
+    import tempfile
+
+    import rasterio
+    from rasterio.transform import from_origin
+
+    dem_data = np.array(
+        [
+            [-9999, -9999, 2150, 2160, 2170, 2185, 2200, 2210, -9999, -9999],
+            [-9999, 2120, 2135, 2150, 2165, 2180, 2195, 2205, 2215, -9999],
+            [2100, 2115, 2130, 2145, 2160, 2175, 2190, 2200, 2210, 2220],
+            [2090, 2105, 2120, 2135, 2150, 2165, 2175, 2185, 2190, 2195],
+            [2080, 2095, 2110, 2125, 2140, 2150, 2160, 2165, 2170, 2175],
+            [2070, 2095, 2100, 2175, 2130, 2140, 2145, 2150, 2155, 2160],  # X
+            [2060, 2075, 2090, 2105, 2115, 2125, 2130, 2135, 2140, 2145],
+            [2050, 1995, 2000, 2080, 2090, 2100, 2110, 2115, 2120, 2125],  # X
+            [2040, 1990, 2000, 2060, 2070, 2080, 2090, 2095, 2100, 2105],  # X
+            [-9999, 2030, 2035, 2040, 2050, 2060, 2070, 2075, -9999, -9999],
+        ],
+        dtype=np.float32,
+    )
+
+    # Add random variability (±2m)
+    np.random.seed(42)  # for reproducibility
+    noise = np.random.uniform(-2, 2, dem_data.shape)
+    mask = dem_data != -9999
+    dem_data[mask] += noise[mask]
+
+    # Define transform (10m resolution)
+    transform = from_origin(0, 100, 10, 10)
+
+    # Write to temporary file
+    with tempfile.NamedTemporaryFile(suffix=".tif", delete=False) as tmp:
+        with rasterio.open(
+            tmp.name,
+            "w",
+            driver="GTiff",
+            height=10,
+            width=10,
+            count=1,
+            dtype=np.float32,
+            crs="EPSG:32632",
+            transform=transform,
+            nodata=-9999,
+        ) as dst:
+            dst.write(dem_data, 1)
+
     data_path = Path("/home/fioli/rse_aletsch/SPOT5_aletsch/pyasp_new/el_bands_sandbox")
     # dem_path = data_path / "dem_aletsch.tif"
     dem_path = data_path / "dems/004_005-006_S5_054-256-0_2003-07-08.tif"
