@@ -1,3 +1,7 @@
+"""This module has been deprecated and will be removed in future versions as the raster statistics computation have been already implemented in geoutils as a method of the Raster class.
+The functions in this module are kept for backward compatibility and will be removed in future versions.
+"""
+
 import json
 import logging
 from dataclasses import asdict, dataclass

@@ -3,15 +3,30 @@ from pathlib import Path
 
 # Import submodules
 from . import (
-    dod,  # noqa
-    elevation_bands,  # noqa
-    # filter,  # noqa
-    io,  # noqa
-    statistics,  # noqa
-    utils,  # noqa
+    # dod,
+    # elevation_bands,
+    # filter,
+    io,
+    # statistics,
+    uncertainty,
+    utils,
 )
 
 __version__ = "0.0.1"
+
+__all__ = [
+    "dod",
+    "elevation_bands",
+    # "filter",
+    "io",
+    "statistics",
+    "uncertainty",
+    "utils",
+    "setup_logger",
+    "logger",
+    "timer",
+    "__version__",
+]
 
 
 def setup_logger(
