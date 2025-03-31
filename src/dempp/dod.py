@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 import geoutils as gu
+import numpy as np
 import xdem
 
 from dempp.io import load_dem
@@ -126,19 +127,23 @@ def differenciate_dems(
         warp_on: Which DEM to reproject ('reference' or 'dem')
         resampling: Resampling method for reprojection
         xlim: Optional x-axis limits for the plot
-        plt_cfg: Optional plotting configuration
+        plt_cfg: Optional plotting configuration to be passed to the plot_raster_statistics() function
 
     Returns:
         tuple[xdem.DEM, RasterStatistics]: The difference DEM and statistics object
     """
     # Load DEMs from paths
-    dem = load_dem(dem)
-    reference = load_dem(reference)
+    dem = load_dem(dem, area_or_point="area")
+    reference = load_dem(reference, area_or_point="area")
 
     # Load mask if provided
-    mask = gu.Mask(inlier_mask) if inlier_mask else None
+    mask_raster = gu.Raster(inlier_mask) if inlier_mask else None
+    mask = mask_raster == 1
     if mask is not None and mask.transform != reference.transform:
-        mask = mask.reproject(reference)
+        mask.reproject(
+            reference, inplace=True, force_source_nodata=255, resampling="nearest"
+        )
+        logger.info("Reprojected mask to match reference DEM")
 
     # Compute DoD
     dod = compute_dod(dem, reference, warp_on=warp_on, resampling=resampling)
@@ -162,7 +167,18 @@ def differenciate_dems(
 
         # Generate plot if requested
         if make_plot:
-            plot_data = apply_mask(dod, mask).data if mask is not None else dod.data
+            # Apply mask to the data for plotting
+            plot_data = (
+                apply_mask(dod, mask).data.compressed()
+                if mask is not None
+                else dod.data.compressed()
+            )
+            # Remove extreme quantiles
+            q1 = np.percentile(plot_data, 0.01)
+            q2 = np.percentile(plot_data, 99.99)
+            plot_data = plot_data[(plot_data > q1) & (plot_data < q2)]
+            logger.info("Removed extreme quantiles (<0.01% and >99.99%) for plotting")
+
             plot_path = output_dir / f"{output_prefix}_plot.png"
             plt_cfg = plt_cfg or {}
             plot_raster_statistics(
