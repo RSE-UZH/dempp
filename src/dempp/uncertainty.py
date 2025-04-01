@@ -3,11 +3,22 @@ from pathlib import Path
 
 import geoutils as gu
 import numpy as np
+import pandas as pd
 import xdem
 from matplotlib import pyplot as plt
 from xdem.spatialstats import nmad
 
+# Initialize logger with propagate=False to prevent double logging
 logger = logging.getLogger("dempp")
+logger.propagate = False
+
+# Only add a handler if the logger doesn't have any
+if not logger.handlers:
+    console_handler = logging.StreamHandler()
+    formatter = logging.Formatter("%(levelname)s:%(name)s:%(message)s")
+    console_handler.setFormatter(formatter)
+    logger.addHandler(console_handler)
+    logger.setLevel(logging.INFO)
 
 
 def analyze_dem_uncertainty(
@@ -17,8 +28,11 @@ def analyze_dem_uncertainty(
     glacier_outlines_path: str | Path,
     additional_predictors: dict[str, Path | str] = None,
     subsample_res: int = None,
-    area_name: str = None,
-    plot_dir: str | Path = None,
+    output_dir: str | Path = None,
+    area_vector: gu.Vector = None,
+    column_name: str = "rgi_id",
+    area_name: str | list[str] = None,
+    min_area_fraction: float = 0.05,
 ) -> dict:
     """Analyze DEM uncertainty and return results.
 
@@ -32,8 +46,10 @@ def analyze_dem_uncertainty(
         glacier_outlines_path: Path to glacier outlines vector file.
         additional_predictors: Dictionary mapping predictor names to file paths. These predictors will be used in the uncertainty analysis.
         subsample_res: Resolution to subsample to for analysis. If None, original resolution is used.
-        area_name: Name/ID of specific area (e.g., glacier) to analyze in detail.
         plot_dir: Directory to save plots. If None, plots are not saved.
+        column_name (str, optional): Column name in the vector dataset to use for area identification. Defaults to "rgi_id".
+        area_name (str | list[str], optional): Name/ID(s) for the area(s) to analyze. If provided, only areas matching these IDs will be processed. Otherwise, all areas in the vector will be processed.
+        min_area_fraction (float, optional): Minimum area percentage to consider for uncertainty analysis. Defaults to 0.05 (5% of the area).
 
     Returns:
         Dict with the following keys:
@@ -66,28 +82,39 @@ def analyze_dem_uncertainty(
     # Analyze heteroscedasticity
     analyzer.analyze_heteroscedasticity()
 
-    if plot_dir is not None:
-        plot_dir = Path(plot_dir)
+    if output_dir is not None:
+        plot_dir = Path(output_dir)
         plot_dir.mkdir(parents=True, exist_ok=True)
-        analyzer.plot_error_vs_predictors_1D(path=plot_dir / "1D binning.png")
-        analyzer.plot_error_vs_predictors_nD(path=plot_dir / "nD binning.png")
-        analyzer.plot_error_map(path=plot_dir / "predicted_error_map.png")
+        analyzer.plot_error_vs_predictors_1D(path=output_dir / "1D binning.png")
+        analyzer.plot_error_vs_predictors_nD(path=output_dir / "nD binning.png")
+        analyzer.plot_error_map(path=output_dir / "predicted_error_map.png")
+        analyzer.sigma_dh.save(output_dir / "predicted_error.tif")
 
     # Analyze spatial correlation
     analyzer.analyze_spatial_correlation()
-    if plot_dir is not None:
-        analyzer.plot_variogram(path=plot_dir / "variogram.png")
+    if output_dir is not None:
+        analyzer.plot_variogram(path=output_dir / "variogram.png")
+        analyzer.variogram_params.to_csv(
+            path_or_buf=output_dir / "variogram_params.csv", index=False, header=True
+        )
 
     # Compute uncertainty for specific area
-    area_result = None
-    if area_name:
-        area_result = analyzer.compute_uncertainty_for_area(area_name=area_name)
+    areas_uncertainty = analyzer.compute_uncertainty_for_area(
+        area_vector=area_vector,
+        column_name=column_name,
+        area_name=area_name,
+        min_area_fraction=min_area_fraction,
+    )
+    if output_dir is not None and areas_uncertainty is not None:
+        areas_uncertainty.to_csv(
+            path_or_buf=output_dir / "areas_uncertainty.csv", index=False, header=True
+        )
 
     return {
         "analyzer": analyzer,
         "dh": analyzer.dh,
         "sigma_dh": analyzer.sigma_dh,
-        "area_result": area_result,
+        "area_result": areas_uncertainty,
     }
 
 
@@ -524,8 +551,8 @@ class DEMUncertaintyAnalyzer:
 
     def plot_error_map(
         self,
-        vmin: float = 0,
-        vmax: float = 20,
+        vmin: float = None,
+        vmax: float = None,
         path: Path = None,
         ax: plt.Axes = None,
     ) -> tuple[plt.Figure, plt.Axes]:
@@ -693,94 +720,178 @@ class DEMUncertaintyAnalyzer:
 
     def compute_uncertainty_for_area(
         self,
-        area_vector: gu.Vector = None,
-        area_name: str = None,
+        area_vector: gu.Vector | Path = None,
         column_name: str = "rgi_id",
+        area_name: str | list[str] = None,
+        min_area_fraction: float = 0.05,
     ) -> dict:
-        """
-        Compute uncertainty for a specific area (e.g., glacier).
+        """Compute uncertainty for specific area(s) (e.g., glaciers).
+
+        This function computes the uncertainty for one or multiple areas. It calculates
+        the mean elevation difference, the mean uncertainty, and the effective number
+        of samples for each area, accounting for spatial correlation.
 
         Args:
-            area_vector (gu.Vector, optional): Vector defining the area of interest.
-            area_name (str, optional): Name/ID for the area in the glacier outlines.
-            column_name (str, optional): Column name for area identification.
+            area_vector (gu.Vector, optional): Vector defining the area(s) of interest. If not provided, the glacier outlines stored in the class will be used.
+            column_name (str, optional): Column name in the vector dataset to use for area identification. Defaults to "rgi_id".
+            area_name (str | list[str], optional): Name/ID(s) for the area(s) to analyze. If provided, only areas matching these IDs will be processed. Otherwise, all areas in the vector will be processed.
+            min_area_fraction (float, optional): Minimum area percentage to consider for uncertainty analysis. Defaults to 0.05 (5% of the area).
 
         Returns:
-            dict: Uncertainty results for the area. It contains:
+            dict: Dictionary with area names/IDs as keys and uncertainty results as values.
+                Each result contains:
                 - area: The area vector
                 - mean_elevation_diff: Mean elevation difference in the area
                 - mean_uncertainty_unscaled: Mean uncertainty in the area
                 - effective_samples: Effective number of samples in the area
                 - uncertainty: Standard error of the mean elevation difference
-        Raises:
-            ValueError: If neither area_vector nor area_name is provided, or if the area_name is not found in the glacier outlines.
-            ValueError: If spatial correlation has not been analyzed yet.
-            ValueError: If glacier outlines are not loaded.
-            ValueError: If area name is not found in the specified column of the glacier outlines.
 
+        Raises:
+            ValueError: If spatial correlation has not been analyzed yet.
+            ValueError: If neither area_vector nor stored glacier outlines are available.
+            ValueError: If the specified column_name does not exist in the vector dataset.
+            ValueError: If area_name is provided but not found in the vector dataset.
         """
-        logger.info("Computing uncertainty for area...")
+        logger.info("Computing uncertainty for area(s)...")
         if not hasattr(self, "variogram_params"):
             raise ValueError(
                 "Spatial correlation not analyzed. Call analyze_spatial_correlation first."
             )
 
-        if area_vector is None and area_name is None:
-            raise ValueError("Either area_vector or area_name must be provided")
-
-        if area_name is not None:
-            # Find the specific glacier by name/ID
+        # Determine which vector to use (input or stored glacier outlines)
+        if area_vector is None:
             if self.glacier_outlines is None:
-                raise ValueError("Glacier outlines not loaded")
+                raise ValueError(
+                    "No area vector provided and glacier outlines not loaded"
+                )
+            work_vector = self.glacier_outlines.copy()
+            logger.debug("Using stored glacier outlines")
+        else:
+            if isinstance(area_vector, (str, Path)):
+                try:
+                    area_vector = gu.Vector(area_vector)
+                except Exception as e:
+                    raise ValueError(
+                        f"Failed to load area vector from {area_vector}: {e}"
+                    )
+            elif not isinstance(area_vector, gu.Vector):
+                raise ValueError(
+                    "area_vector must be a geoutils.Vector or a path to a vector file."
+                )
+            work_vector = area_vector.copy()
+            logger.debug("Using provided area vector")
 
-            try:
-                area_vector = self.glacier_outlines[
-                    self.glacier_outlines[column_name] == area_name
-                ]
-            except KeyError as err:
+        # Check if column_name exists in the vector
+        if column_name not in work_vector.ds.columns:
+            available_columns = work_vector.ds.columns.tolist()
+            raise ValueError(
+                f"Column '{column_name}' not found in vector dataset. "
+                f"Available columns: {available_columns}"
+            )
+
+        # If area_name is provided, filter the vector to include only matching areas
+        if area_name is not None:
+            # Filter vector by area name(s)
+            if isinstance(area_name, str):
+                area_name = [area_name]
+            filtered_vector = work_vector[work_vector.ds[column_name].isin(area_name)]
+
+            if filtered_vector.ds.empty:
+                available_ids = work_vector.ds[column_name].unique().tolist()
                 raise ValueError(
-                    f"Area name '{area_name}' not found in column '{column_name}'"
-                ) from err
-            if area_vector.ds.empty:
-                raise ValueError(
-                    f"Area name '{area_name}' not found in the glacier outlines"
+                    f"Area name(s) {area_name} not found in column '{column_name}'. "
+                    f"Available IDs: {available_ids[:5]}{'...' if len(available_ids) > 5 else ''}"
                 )
 
-        if area_vector.crs.is_geographic:
-            area_vector = area_vector.to_crs(crs=area_vector.ds.estimate_utm_crs())
+            work_vector = filtered_vector
+            logger.debug(
+                f"Filtered vector to {len(work_vector.ds)} geometries matching {area_name}"
+            )
 
-        # Create mask for the area
-        area_mask = area_vector.create_mask(self.ref_dem)
+        # Ensure vector is in a projected CRS
+        if work_vector.crs.is_geographic:
+            logger.debug("Converting vector from geographic to projected CRS")
+            work_vector = work_vector.to_crs(crs=work_vector.ds.estimate_utm_crs())
 
-        # Compute the mean elevation difference in the area and the mean error
-        dh_area = np.nanmean(self.dh[area_mask])
-        mean_sig = np.nanmean(self.sigma_dh[area_mask])
-        logger.info(
-            f"Mean elevation difference in the given area: {dh_area:.2f} ± {mean_sig:.2f} m"
-        )
+        # Initialize results dictionary
+        results = {}
 
-        # Calculate effective number of samples
-        n_eff = xdem.spatialstats.number_effective_samples(
-            area=area_vector, params_variogram_model=self.variogram_params
-        )
-        logger.info(
-            f"Effective number of samples in the Aletsch glacier area: {n_eff:.2f}"
-        )
+        # Process each geometry in the vector
+        for idx, row in work_vector.ds.iterrows():
+            # Get area identifier from column
+            area_id = row[column_name]
+            logger.info(f"Processing area: {area_id}")
 
-        # Rescale the standard deviation of the mean elevation difference with the effective number of samples
-        sig_dh_area = mean_sig / np.sqrt(n_eff)
-        err_perc = sig_dh_area / abs(dh_area) * 100 if dh_area != 0 else float("inf")
-        logger.info(
-            f"Random error for the mean elevation change in the given area: {sig_dh_area:.2f} m ({err_perc:.2f}%)"
-        )
+            # Extract single geometry
+            single_geom = work_vector.copy()
+            single_geom.ds = single_geom.ds.iloc[[idx]]
 
-        return {
-            "area": area_vector,
-            "mean_elevation_diff": dh_area,
-            "mean_uncertainty_unscaled": mean_sig,
-            "effective_samples": n_eff,
-            "uncertainty": sig_dh_area,
-        }
+            # Create mask for the current geometry
+            area_mask = single_geom.create_mask(self.ref_dem)
+
+            # Check if the mask contains any valid pixels
+            if not np.any(area_mask):
+                logger.warning(f"Area {area_id} has no valid pixels - skipping")
+                continue
+
+            # Check if the DEM covers at least min_area_fraction of the area
+            dem_px_in_area = len(self.dh[area_mask].compressed())
+            area_coverage = dem_px_in_area / np.sum(area_mask)
+            if area_coverage < min_area_fraction:
+                logger.info(
+                    f"DEM {self.dem_path.name} covers only {area_coverage:.2%} of the area {area_id}. It's less than the minimum fraction {min_area_fraction:.2%} - skipping"
+                )
+                continue
+
+            # Compute the mean elevation difference in the area and the mean error
+            dh_area = np.nanmean(self.dh[area_mask])
+            mean_sig = np.nanmean(self.sigma_dh[area_mask])
+            logger.info(
+                f"Area {area_id}: Mean elevation difference: {dh_area:.2f} ± {mean_sig:.2f} m"
+            )
+
+            # Calculate effective number of samples
+            n_eff = xdem.spatialstats.number_effective_samples(
+                area=single_geom,
+                params_variogram_model=self.variogram_params,
+                rasterize_resolution=10,
+            )
+            logger.info(f"Area {area_id}: Effective number of samples: {n_eff:.2f}")
+
+            # Rescale the standard deviation of the mean elevation difference with the effective number of samples
+            sig_dh_area = mean_sig / np.sqrt(n_eff)
+            err_perc = (
+                sig_dh_area / abs(dh_area) * 100 if dh_area != 0 else float("inf")
+            )
+            logger.info(
+                f"Area {area_id}: Random error for mean elevation change: {sig_dh_area:.2f} m ({err_perc:.2f}%)"
+            )
+
+            # Store results for this geometry using the area_id as key
+            results[area_id] = {
+                "mean_elevation_diff": dh_area,
+                "mean_uncertainty_unscaled": mean_sig,
+                "effective_samples": n_eff,
+                "uncertainty": sig_dh_area,
+            }
+
+            logger.info(f"Completed uncertainty calculation for {len(results)} area(s)")
+
+        # Convert the results to a dataframe
+        results_df = pd.DataFrame.from_dict(results, orient="index")
+
+        # if the dataframe is empty, create an empty dataframe with the same columns
+        if results_df.empty:
+            results_df = pd.DataFrame(
+                columns=[
+                    "mean_elevation_diff",
+                    "mean_uncertainty_unscaled",
+                    "effective_samples",
+                    "uncertainty",
+                ]
+            )
+
+        return results_df
 
     def plot_area_result(self, area_result, figsize=(12, 6), vmin=-30, vmax=30):
         """
