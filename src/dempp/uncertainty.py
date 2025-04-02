@@ -1,4 +1,5 @@
 import logging
+import pickle
 from pathlib import Path
 
 import geoutils as gu
@@ -110,6 +111,10 @@ def analyze_dem_uncertainty(
             path_or_buf=output_dir / "areas_uncertainty.csv", index=False, header=True
         )
 
+    # Save the analyzer state to a pickle file
+    if output_dir is not None:
+        analyzer.to_pickle(output_dir / "analyzer_state.pkl")
+
     return {
         "analyzer": analyzer,
         "dh": analyzer.dh,
@@ -144,6 +149,48 @@ class DEMUncertaintyAnalyzer:
         # Spatial correlation analysis
         self.sigma_dh = None
         self.variogram_model = None
+
+    def to_pickle(self, path: Path | str) -> bool:
+        """
+        Save the current state of the analyzer to a pickle file.
+
+        Args:
+            path (Path | str): Path to save the pickle file.
+
+        Returns:
+            bool: True if saved successfully, False otherwise.
+        """
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            with open(path, "wb") as f:
+                pickle.dump(self, f)
+            return True
+        except Exception as e:
+            logger.error(f"Failed to save to {path}: {e}")
+            return False
+
+    @classmethod
+    def from_pickle(cls, path: Path | str) -> "DEMUncertaintyAnalyzer":
+        """
+        Load the analyzer state from a pickle file.
+
+        Args:
+            path (Path | str): Path to the pickle file.
+
+        Returns:
+            DEMUncertaintyAnalyzer: Loaded instance of the analyzer.
+        """
+        path = Path(path)
+        if not path.exists():
+            raise FileNotFoundError(f"File {path} does not exist.")
+
+        try:
+            with open(path, "rb") as f:
+                return pickle.load(f)
+        except Exception as e:
+            logger.error(f"Failed to load from {path}: {e}")
+            raise
 
     def load_data(
         self,
@@ -854,7 +901,7 @@ class DEMUncertaintyAnalyzer:
             n_eff = xdem.spatialstats.number_effective_samples(
                 area=single_geom,
                 params_variogram_model=self.variogram_params,
-                rasterize_resolution=10,
+                # rasterize_resolution=10,
             )
             logger.info(f"Area {area_id}: Effective number of samples: {n_eff:.2f}")
 
