@@ -1,5 +1,4 @@
 import logging
-from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
@@ -8,11 +7,9 @@ import numpy as np
 import rasterio as rio
 import xdem
 from joblib import Parallel, delayed
-from rasterio import features, warp
-from rasterio.crs import CRS
-from rasterio.windows import Window
+from rasterio import features
+from rasterio.windows import Window, from_bounds
 from scipy.stats import zscore
-from shapely.geometry import Polygon
 from tqdm import tqdm
 from tqdm.contrib.logging import logging_redirect_tqdm
 from xdem.spatialstats import nmad
@@ -26,226 +23,6 @@ class OutlierMethod(Enum):
     ZSCORE = "zscore"  # z-score
     NORMAL = "normal"  # mean/std
     ROBUST = "robust"  # median/nmad
-
-
-@dataclass(kw_only=True)
-class DEMWindow:
-    """Class to store DEM window and its metadata"""
-
-    data: np.ndarray
-    window: Window
-    bounds: tuple[float, float, float, float]
-    transform: rio.Affine
-    no_data: float = None
-    mask: np.ndarray = None
-    crs: CRS | str | int = None
-
-    def to_file(self, path: Path):
-        """Save DEM window to file"""
-
-        path = Path(path)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with rio.open(
-            path,
-            "w",
-            driver="GTiff",
-            height=self.window.height,
-            width=self.window.width,
-            count=1,
-            dtype=self.data.dtype,
-            crs=self.crs,
-            transform=self.transform,
-            nodata=self.no_data,
-        ) as dst:
-            dst.write(self.data, 1)
-
-
-def extract_dem_window(
-    dem_path: str, geom: gpd.GeoDataFrame | Polygon, padding: int = 1
-) -> DEMWindow:
-    """Extract a window from DEM based on geometry bounds with padding.
-
-    Args:
-        dem_path (str): Path to the DEM file.
-        geom (gpd.GeoDataFrame | Polygon): Geometry to extract window for. if GeoDataFrame, uses first geometry.
-        padding (int, optional): Padding to add around the geometry bounds. Defaults to 1.
-
-    Returns:
-        DEMWindow: The extracted DEM window and its metadata.
-    """
-    with rio.open(dem_path, mode="r") as src:
-        # Get raster bounds
-        raster_bounds = src.bounds
-
-        # Get geometry bounds based on input type
-        if isinstance(geom, gpd.GeoDataFrame):
-            geom_bounds = geom.bounds.values[0]
-            geom_id = f"ID: {geom.index[0]}"
-        else:  # Polygon
-            geom_bounds = geom.bounds
-            geom_id = "Polygon"
-        minx, miny, maxx, maxy = geom_bounds
-
-        # Check intersection
-        if not (
-            minx < raster_bounds.right
-            and maxx > raster_bounds.left
-            and miny < raster_bounds.top
-            and maxy > raster_bounds.bottom
-        ):
-            logger.debug(f"Geometry ({geom_id}) does not overlap with raster bounds")
-            return None
-
-        try:
-            # Convert bounds to pixel coordinates
-            row_start, col_start = src.index(minx, maxy)
-            row_stop, col_stop = src.index(maxx, miny)
-        except IndexError:
-            logger.debug(f"Geometry ({geom_id}) coordinates outside raster bounds")
-            return None
-
-        # Add padding
-        row_start = max(0, row_start - padding)
-        col_start = max(0, col_start - padding)
-        row_stop = min(src.height, row_stop + padding)
-        col_stop = min(src.width, col_stop + padding)
-
-        if row_stop <= row_start or col_stop <= col_start:
-            logger.debug(f"Invalid window dimensions for geometry ({geom_id})")
-            return None
-
-        # Rest of the function remains the same
-        window = Window(
-            col_start, row_start, col_stop - col_start, row_stop - row_start
-        )
-        transform = src.window_transform(window)
-        data = src.read(1, window=window)
-        mask = (
-            data == src.nodata
-            if src.nodata is not None
-            else np.zeros_like(data, dtype=bool)
-        )
-        bounds = rio.windows.bounds(window, src.transform)
-        if src.crs is None:
-            crs = None
-        else:
-            crs = src.crs if isinstance(src.crs, CRS) else CRS.from_string(src.crs)
-
-    return DEMWindow(
-        data=data,
-        window=window,
-        bounds=bounds,
-        transform=transform,
-        no_data=src.nodata,
-        mask=mask,
-        crs=crs,
-    )
-
-
-def vector_to_mask(
-    geometry: gpd.GeoDataFrame | Polygon,
-    window_shape: tuple[int, int],
-    transform: rio.Affine,
-    crs: CRS | None = None,
-    buffer: int | float = 0,
-    bounds: tuple[float, float, float, float] | None = None,
-) -> np.ndarray:
-    """Creates a rasterized boolean mask for vector geometries.
-
-    Converts vector geometry to a raster mask using the provided spatial
-    reference system and transform. Optionally applies a buffer to the geometries
-    and crops to specified bounds.
-
-    Args:
-        geometry: Vector data as either GeoDataFrame or Shapely Polygon.
-        window_shape: Output raster dimensions as (height, width).
-        transform: Affine transform defining the raster's spatial reference.
-        crs: Coordinate reference system for output raster. If None, uses geometry's CRS.
-            Required when input is a Polygon or when GeoDataFrame has no CRS.
-        buffer: Distance to buffer geometries. Zero means no buffer. Defaults to 0.
-        bounds: Spatial bounds as (left, bottom, right, top). If None, uses geometry bounds.
-
-    Returns:
-        Boolean mask where True indicates the geometry.
-
-    Raises:
-        TypeError: If buffer is not a number.
-        ValueError: If geometry is empty or invalid, or if CRS is None when required.
-    """
-    # Convert Polygon to GeoDataFrame if needed
-    if not isinstance(geometry, gpd.GeoDataFrame):
-        if crs is None:
-            raise ValueError("CRS must be provided when input is a Polygon")
-        geometry = gpd.GeoDataFrame(geometry=[geometry], crs=crs)
-
-    # Make copy to avoid modifying input
-    gdf = geometry.copy()
-
-    # Handle CRS - crucial when working with features from iterfeatures()
-    if crs is None:
-        if gdf.crs is None:
-            raise ValueError("CRS must be provided when GeoDataFrame has no CRS")
-        target_crs = gdf.crs
-    else:
-        # If GeoDataFrame has no CRS but crs parameter is provided, set it
-        target_crs = crs
-        if gdf.crs is None:
-            logger.debug("Setting CRS on GeoDataFrame that lacks one")
-            gdf.set_crs(target_crs, inplace=True)
-
-    # Crop to bounds if provided
-    if bounds is not None:
-        left, bottom, right, top = bounds
-        try:
-            x1, y1, x2, y2 = warp.transform_bounds(
-                target_crs, gdf.crs, left, bottom, right, top
-            )
-            gdf = gdf.cx[x1:x2, y1:y2]
-        except Exception as e:
-            logger.warning(f"Error cropping to bounds: {e}")
-            # Continue with uncropped geometries
-
-    # Reproject to target CRS if needed
-    if gdf.crs != target_crs:
-        try:
-            gdf = gdf.to_crs(target_crs)
-        except ValueError as e:
-            logger.warning(f"CRS transformation error: {e}. Setting CRS explicitly.")
-            # Handle case where GeoDataFrame has invalid/incompatible CRS
-            gdf.set_crs(target_crs, inplace=True)
-
-    # Apply buffer if requested
-    if buffer != 0:
-        if not isinstance(buffer, (int, float)):
-            raise TypeError(f"Buffer must be number, got {type(buffer)}")
-        gdf.geometry = [geom.buffer(buffer) for geom in gdf.geometry]
-
-    # Validate shapes are not empty
-    if gdf.empty or gdf.geometry.is_empty.all():
-        logger.warning("No valid geometries found after processing")
-        return np.zeros(window_shape, dtype=bool)
-
-    # Handle possible MultiPolygons that might cause issues with rasterization
-    if any(geom.geom_type.startswith("Multi") for geom in gdf.geometry):
-        # Explode MultiPolygons into individual Polygons
-        gdf = gdf.explode(index_parts=False)
-
-    # Rasterize geometries
-    try:
-        mask = features.rasterize(
-            shapes=gdf.geometry,
-            out_shape=window_shape,
-            transform=transform,
-            fill=0,
-            default_value=1,
-            dtype="uint8",
-        ).astype(bool)
-    except Exception as e:
-        logger.error(f"Rasterization failed: {e}")
-        # Return empty mask in case of failure
-        return np.zeros(window_shape, dtype=bool)
-
-    return mask
 
 
 def find_outliers(
@@ -439,16 +216,12 @@ def get_outlier_mask(
 
     Args:
         dem_path (Path | str): Path to the DEM file.
-        geometry (gpd.GeoDataFrame | dict): Vector geometry with the boundaries that will be used to filter the DEM within it. It can be a GeoDataFrame or a dictionary compatible with the __geo_interface__ format (as it comes from geodataframe.iterfeatures()). Defaults to None.
+        boundary (gpd.GeoDataFrame | dict): Vector geometry with the boundaries that will be used to filter the DEM within it. It can be a GeoDataFrame or a dictionary compatible with the __geo_interface__ format (as it comes from geodataframe.iterfeatures()). Defaults to None.
         filter_method (OutlierMethod | List[OutlierMethod], optional): Outlier detection method. If a list is provided, the filters will be applied sequentially and the final mask will be the union of all masks. Defaults to OutlierMethod.ROBUST.
         outlier_threshold (float, optional): Number of std/mad for outlier threshold. Defaults to 3.
-        use_elevation_bands (bool, optional): Whether to use elevation bands for filtering. Defaults to True.
-        elevation_band_width (float): Width of elevation bands.
-        geometry_id (str, optional): Optional geometry_id for logging. Defaults to None.
-        **kwargs: Additional keyword arguments to be passed to the filter_by_elevation_bands() function.
 
     Returns:
-        Tuple[np.ndarray, Window]: The outlier mask, the DEM window and the elevation bands statistics (if use_elevation_bands=True, else None).
+        Tuple[np.ndarray, Window]: The outlier mask and the DEM window.
     """
 
     if isinstance(filter_method, list):
@@ -456,47 +229,70 @@ def get_outlier_mask(
             "Multiple filter methods are not implemented yet. Please use a single method."
         )
 
-    if boundary is not None:
-        if not isinstance(boundary, (gpd.GeoDataFrame, dict)):
-            raise ValueError(
-                "Boundary must be a GeoDataFrame or a dictionary compatible with the __geo_interface__ format."
+    with rio.open(dem_path) as src:
+        if boundary is not None:
+            # Convert dict to GeoDataFrame if needed
+            if isinstance(boundary, dict):
+                boundary = gpd.GeoDataFrame.from_features([boundary])
+
+                # we manually set the CRS to the DEM CRS (it was reprojected beforehand)
+                boundary.set_crs(src.crs, inplace=True)
+
+            # Get bounds of the geometry
+            minx, miny, maxx, maxy = boundary.total_bounds
+
+            # Get pixel coordinates from bounds
+            window = from_bounds(minx, miny, maxx, maxy, src.transform)
+            window = window.round_lengths().round_offsets()
+
+            # Make sure window is within raster bounds
+            try:
+                window = window.intersection(Window(0, 0, src.width, src.height))
+            except Exception as e:
+                logger.debug(f"Window intersection failed: {e}")
+                return None, None
+
+            # Check if window is valid
+            if window.width <= 0 or window.height <= 0:
+                logger.debug("Window outside raster bounds")
+                return None, None
+
+            # Read the DEM data within the window
+            dem_data = src.read(1, window=window)
+            transform = src.window_transform(window)
+
+            # Create mask for the geometry
+            geometry_mask = features.rasterize(
+                shapes=boundary.geometry,
+                out_shape=(window.height, window.width),
+                transform=transform,
+                fill=0,
+                default_value=1,
+                dtype="uint8",
+            ).astype(bool)
+
+            # Create mask for nodata values
+            nodata_mask = (
+                dem_data == src.nodata
+                if src.nodata is not None
+                else np.zeros_like(dem_data, dtype=bool)
             )
-        if isinstance(boundary, dict):
-            boundary = gpd.GeoDataFrame.from_features([boundary])
 
-        # Extract DEM window around the given geometry
-        dem_window = extract_dem_window(dem_path, boundary)
-        if dem_window is None:
-            return None, None
+            # Combine masks (True = masked)
+            combined_mask = ~geometry_mask | nodata_mask
 
-        window = dem_window.window
-        logger.debug(f"Extracted DEM window: {window}")
+            # Create masked array
+            masked_dem = np.ma.masked_array(dem_data, mask=combined_mask)
 
-        # Create glacier mask for window
-        mask = vector_to_mask(
-            boundary,
-            (window.height, window.width),
-            dem_window.transform,
-            crs=dem_window.crs,
-        )
-        logger.debug("Created glacier mask for window")
-
-        # Combine glacier mask with nodata mask
-        combined_mask = ~mask | dem_window.mask
-
-        # Apply combined mask
-        masked_dem = np.ma.masked_array(dem_window.data, mask=combined_mask)
-
-    else:
-        # Load full DEM with rasterio
-        with rio.open(dem_path) as src:
+        else:
+            # Load full DEM
             masked_dem = src.read(1, masked=True)
-        window = None
+            window = None
 
-    # Check if the dem is completely masked
+    # Check if the DEM is completely masked
     if masked_dem.mask.all():
         logger.debug(
-            "DEM is completely masked within the fiven geometry, returning empty mask"
+            "DEM is completely masked within the given geometry, returning empty mask"
         )
         empty_mask = np.zeros_like(masked_dem.data, dtype=bool)
         return empty_mask, window
