@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import logging
-import warnings
 from enum import Enum
 from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import geopandas as gpd
 import numpy as np
@@ -16,16 +16,9 @@ from rasterio.windows import Window, from_bounds
 from scipy.stats import zscore
 from tqdm import tqdm
 from tqdm.contrib.logging import logging_redirect_tqdm
-from xdem.spatialstats import nmad
-
-try:
-    import cv2
-
-    _has_cv2 = True
-except ImportError:
-    _has_cv2 = False
-import scipy
 from xdem._typing import NDArrayf
+from xdem.filters import gaussian_filter_cv
+from xdem.spatialstats import nmad
 
 logger = logging.getLogger("dempp")
 
@@ -36,135 +29,35 @@ class OutlierMethod(Enum):
     NMAD = "nmad"  # median/nmad
     ZSCORE = "zscore"  # z-score
     NORMAL = "normal"  # mean/std
-    GAUSS_SCIPY = "gauss_scipy"  # Gaussian filter using scipy
-    GAUSS_CV = "gauss_cv"  # Gaussian filter using OpenCV
     DISTANCE = "distance"  # Distance filter
 
 
-def gaussian_filter_scipy(array: NDArrayf, sigma: float) -> NDArrayf:  # type: ignore
-    """
-    Apply a Gaussian filter to a raster that may contain NaNs, using scipy's implementation.
-    gaussian_filter_cv is recommended as it is usually faster, but this depends on the value of sigma.
-
-    N.B: kernel_size is set automatically based on sigma.
-
-    :param array: the input array to be filtered.
-    :param sigma: the sigma of the Gaussian kernel
-
-    :returns: the filtered array (same shape as input)
-    """
-    # Check that array dimension is 2 or 3
-    if np.ndim(array) not in [2, 3]:
-        raise ValueError(
-            f"Invalid array shape given: {array.shape}. Expected 2D or 3D array."
-        )
-
-    # In case array does not contain NaNs, use scipy's gaussian filter directly
-    if np.count_nonzero(np.isnan(array)) == 0:
-        return scipy.ndimage.gaussian_filter(array, sigma=sigma)
-
-    # If array contain NaNs, need a more sophisticated approach
-    # Inspired by https://stackoverflow.com/a/36307291
-    else:
-        # Run filter on a copy with NaNs set to 0
-        array_no_nan = array.copy()
-        array_no_nan[np.isnan(array)] = 0
-        gauss_no_nan = scipy.ndimage.gaussian_filter(array_no_nan, sigma=sigma)
-        del array_no_nan
-
-        # Mask of NaN values
-        nan_mask = 0 * array.copy() + 1
-        nan_mask[np.isnan(array)] = 0
-        gauss_mask = scipy.ndimage.gaussian_filter(nan_mask, sigma=sigma)
-        del nan_mask
-
-        with warnings.catch_warnings():
-            warnings.filterwarnings("ignore", message="invalid value encountered")
-            gauss = gauss_no_nan / gauss_mask
-
-        return gauss
-
-
-def gaussian_filter_cv(array: NDArrayf, sigma: float) -> NDArrayf:  # type: ignore
-    """
-    Apply a Gaussian filter to a raster that may contain NaNs, using OpenCV's implementation.
-    Arguments are for now hard-coded to be identical to scipy.
-
-    N.B: kernel_size is set automatically based on sigma
-
-    :param array: the input array to be filtered.
-    :param sigma: the sigma of the Gaussian kernel
-
-    :returns: the filtered array (same shape as input)
-    """
-    if not _has_cv2:
-        raise ValueError("Optional dependency needed. Install 'opencv'.")
-
-    # Check that array dimension is 2, or can be squeezed to 2D
-    orig_shape = array.shape
-    if len(orig_shape) == 2:
-        pass
-    elif len(orig_shape) == 3:
-        if orig_shape[0] == 1:
-            array = array.squeeze()
-        else:
-            raise NotImplementedError("Case of array of dimension 3 not implemented.")
-    else:
-        raise ValueError(
-            f"Invalid array shape given: {orig_shape}. Expected 2D or 3D array."
-        )
-
-    # In case array does not contain NaNs, use OpenCV's gaussian filter directly
-    # With kernel size (0, 0), i.e. set to default, and borderType=BORDER_REFLECT, the output is equivalent to scipy
-    if np.count_nonzero(np.isnan(array)) == 0:
-        gauss = cv2.GaussianBlur(
-            array, (0, 0), sigmaX=sigma, borderType=cv2.BORDER_REFLECT
-        )
-
-    # If array contain NaNs, need a more sophisticated approach
-    # Inspired by https://stackoverflow.com/a/36307291
-    else:
-        # Run filter on a copy with NaNs set to 0
-        array_no_nan = array.copy()
-        array_no_nan[np.isnan(array)] = 0
-        gauss_no_nan = cv2.GaussianBlur(
-            array_no_nan, (0, 0), sigmaX=sigma, borderType=cv2.BORDER_REFLECT
-        )
-        del array_no_nan
-
-        # Mask of NaN values
-        nan_mask = 0 * array.copy() + 1
-        nan_mask[np.isnan(array)] = 0
-        gauss_mask = cv2.GaussianBlur(
-            nan_mask, (0, 0), sigmaX=sigma, borderType=cv2.BORDER_REFLECT
-        )
-        del nan_mask
-
-        with warnings.catch_warnings():
-            warnings.filterwarnings("ignore", message="invalid value encountered")
-            gauss = gauss_no_nan / gauss_mask
-
-    return gauss.reshape(orig_shape)
-
-
 def distance_filter(
-    array: NDArrayf,  # type: ignore
+    array: NDArrayf,
     radius: float,
     outlier_threshold: float,
-) -> NDArrayf:  # type: ignore
+) -> NDArrayf:
     """
-    Filter out pixels whose value is distant more than a set threshold from the average value of all neighbor \
-pixels within a given radius.
-    Filtered pixels are set to NaN.
+    Filter out pixels whose value is distant from the average of neighboring pixels.
 
-    TO DO: Add an option on how the "average" value should be calculated, i.e. using a Gaussian, median etc filter.
+    This function identifies pixels whose value differs from their neighborhood average
+    by more than a specified threshold and sets them to NaN.
 
-    :param array: the input array to be filtered.
-    :param radius: the radius in which the average value is calculated (for Gaussian filter, this is sigma).
-    :param outlier_threshold: the minimum difference abs(array - mean) for a pixel to be considered an outlier.
+    Args:
+        array: Input array to be filtered
+        radius: Radius (in pixels) within which to calculate the average value
+        outlier_threshold: Minimum absolute difference between pixel value and local
+                          average for a pixel to be considered an outlier
 
-    :returns: the filtered array (same shape as input)
+    Returns:
+        NDArrayf: Boolean array identifying outlier pixels (True = outlier)
+
+    Todo:
+        Add options for different averaging methods (Gaussian, median, etc.)
     """
+    logger.debug(
+        f"Running distance filter with radius={radius}, threshold={outlier_threshold}"
+    )
     outliers = _distance_filter(array, radius, outlier_threshold)
     out_array = np.copy(array)
     out_array[outliers] = np.nan
@@ -173,22 +66,27 @@ pixels within a given radius.
 
 
 def _distance_filter(
-    array: NDArrayf,  # type: ignore
+    array: NDArrayf,
     radius: float,
     outlier_threshold: float,
-) -> NDArrayf:  # type: ignore
+) -> NDArrayf:
     """
-    Filter out pixels whose value is distant more than a set threshold from the average value of all neighbor \
-pixels within a given radius.
-    Filtered pixels are set to NaN.
+    Identify pixels whose value differs from their neighborhood average by more than a threshold.
 
-    TO DO: Add an option on how the "average" value should be calculated, i.e. using a Gaussian, median etc filter.
+    This internal function performs the actual distance-based outlier detection without
+    modifying the input array.
 
-    :param array: the input array to be filtered.
-    :param radius: the radius in which the average value is calculated (for Gaussian filter, this is sigma).
-    :param outlier_threshold: the minimum difference abs(array - mean) for a pixel to be considered an outlier.
+    Args:
+        array: Input array to check for outliers
+        radius: Radius (in pixels) within which to calculate the average value (sigma for Gaussian filter)
+        outlier_threshold: Minimum absolute difference between pixel value and local
+                          average for a pixel to be considered an outlier
 
-    :returns: the filtered array (same shape as input)
+    Returns:
+        NDArrayf: Boolean array identifying outlier pixels (True = outlier)
+
+    Todo:
+        Add options for different averaging methods (Gaussian, median, etc.)
     """
     # Calculate the average value within the radius
     smooth = gaussian_filter_cv(array, sigma=radius)
@@ -196,6 +94,7 @@ pixels within a given radius.
     # Filter outliers
     outliers = (np.abs(array - smooth)) > outlier_threshold
 
+    logger.debug(f"Distance filter identified {np.sum(outliers)} outliers")
     return outliers
 
 
@@ -204,29 +103,30 @@ def _zscore_filter(
     outlier_threshold: float = 3,
     **kwargs,
 ) -> np.ndarray:
-    """Find outliers using z-score method.
+    """
+    Find outliers using z-score method.
 
-    This function computes z-scores for the array and identifies values that deviate
-    more than a specified threshold from the mean in terms of standard deviations.
+    This function identifies values that deviate more than a specified threshold
+    from the mean in terms of standard deviations.
 
     Args:
-        values (np.ndarray): Input 2D array to check for outliers.
-        outlier_threshold (float, optional): maximum value of the Z distribution that is accepted. Values with |z-score| > outlier_threshold are considered outliers. Defaults to 3.
-        **kwargs: Additional parameters passed to zscore function.
-            See scipy.stats.zscore for more details.
-            Note: 'nan_policy' is set to 'omit' by default to handle NaN values.
-            If you want to include NaN values in the calculation, set 'nan_policy' to 'raise'.
-
+        values: Input array to check for outliers
+        outlier_threshold: Maximum absolute z-score allowed; values with |z-score| > threshold
+                          are considered outliers (default: 3)
+        **kwargs: Additional parameters passed to scipy.stats.zscore
+                 'nan_policy' is set to 'omit' by default to handle NaN values
 
     Returns:
-        np.ndarray: Boolean array marking outliers (True = outlier).
-            Masked pixels (if mask provided) will be False in output.
+        np.ndarray: Boolean array marking outliers (True = outlier)
     """
     outliers = np.zeros_like(values, dtype=bool)
     nan_policy = kwargs.pop("nan_policy", "omit")
     z_scores = zscore(values, nan_policy=nan_policy, **kwargs)
     outliers = np.abs(z_scores) > outlier_threshold
 
+    logger.debug(
+        f"Z-score filter identified {np.sum(outliers)} outliers using threshold {outlier_threshold}"
+    )
     return outliers
 
 
@@ -234,24 +134,29 @@ def _normal_filter(
     values: np.ndarray,
     n_limit: float = 3,
 ) -> np.ndarray:
-    """Find outliers using normal distribution method (mean/std).
+    """
+    Find outliers using normal distribution method (mean/standard deviation).
 
-    This function identifies outliers based on how far values deviate from the mean
-    in terms of standard deviations.
+    This function identifies values that deviate more than a specified number of
+    standard deviations from the mean.
 
     Args:
-        values (np.ndarray): Input 2D array to check for outliers.
-        n_limit (float, optional): Number of standard deviations for outlier threshold. Values with |value-mean| > n_limit*std are considered outliers. Defaults to 3.
+        values: Input array to check for outliers
+        n_limit: Number of standard deviations for outlier threshold; values with
+                |value-mean| > n_limit*std are considered outliers (default: 3)
 
     Returns:
-        np.ndarray: Boolean array marking outliers (True = outlier).
-            Masked pixels (if mask provided) will be False in output.
+        np.ndarray: Boolean array marking outliers (True = outlier)
     """
     outliers = np.zeros_like(values, dtype=bool)
     mean = np.mean(values)
     std = np.std(values)
     outliers = np.abs(values - mean) > n_limit * std
 
+    logger.debug(
+        f"Normal filter identified {np.sum(outliers)} outliers using {n_limit} std limit"
+    )
+    logger.debug(f"Mean: {mean:.2f}, Std: {std:.2f}")
     return outliers
 
 
@@ -259,53 +164,67 @@ def _nmad_filter(
     values: np.ndarray,
     outlier_threshold: float = 3,
 ) -> np.ndarray:
-    """Find outliers using robust method (median/nmad).
+    """
+    Find outliers using robust method (median/normalized median absolute deviation).
 
-    This function identifies outliers based on how far values deviate from the median
-    in terms of normalized median absolute deviations (NMAD), providing more
-    robustness against existing outliers than mean/std methods.
+    This function identifies values that deviate more than a specified number of NMADs
+    from the median, providing greater robustness against existing outliers compared
+    to mean/std methods.
 
     Args:
-        values (np.ndarray): Input 2D array to check for outliers.
-        outlier_threshold (float, optional): Number of NMADs for outlier threshold.
-            Values with |value-median| > outlier_threshold*nmad are considered outliers. Defaults to 3.
-        mask (np.ndarray | None, optional): Boolean mask where True indicates invalid/masked values.
-            If provided, outlier detection is applied only on non-masked values.
-            If None, outlier detection is applied to the entire array. Defaults to None.
-        **kwargs: Additional parameters (unused for this method).
+        values: Input array to check for outliers
+        outlier_threshold: Number of NMADs for outlier threshold; values with
+                          |value-median| > outlier_threshold*nmad are considered outliers (default: 3)
 
     Returns:
-        np.ndarray: Boolean array marking outliers (True = outlier).
-            Masked pixels (if mask provided) will be False in output.
+        np.ndarray: Boolean array marking outliers (True = outlier)
     """
     outliers = np.zeros_like(values, dtype=bool)
     median = np.median(values)
     mad_value = nmad(values)
     outliers = np.abs(values - median) > outlier_threshold * mad_value
 
+    logger.debug(
+        f"NMAD filter identified {np.sum(outliers)} outliers using {outlier_threshold} NMAD threshold"
+    )
+    logger.debug(f"Median: {median:.2f}, NMAD: {mad_value:.2f}")
     return outliers
 
 
 def find_outliers(
     dem_path: Path | str,
-    boundary: gpd.GeoDataFrame | dict | None = None,
-    method: OutlierMethod | str = OutlierMethod.NMAD,
+    boundary: Optional[Union[gpd.GeoDataFrame, Dict[str, Any]]] = None,
+    method: Union[OutlierMethod, str] = OutlierMethod.NMAD,
     **kwargs,
-) -> tuple[np.ndarray, Window]:
-    """Process a single glacier and return its outlier mask.
+) -> Tuple[Optional[np.ndarray], Optional[Window]]:
+    """
+    Process a DEM within a specified boundary and identify outliers.
 
     Args:
-        dem_path (Path | str): Path to the DEM file.
-        boundary (gpd.GeoDataFrame | dict): Vector geometry with the boundaries that will be used to filter the DEM within it. It can be a GeoDataFrame or a dictionary compatible with the __geo_interface__ format. Defaults to None.
-        method (OutlierMethod, optional): Outlier detection method. Defaults to OutlierMethod.NMAD.
-        **kwargs: Additional keyword arguments passed to the filter method.
+        dem_path: Path to the DEM file
+        boundary: Vector geometry defining the area of interest. Can be a GeoDataFrame
+                 or a dictionary compatible with __geo_interface__ format (default: None)
+        method: Outlier detection method to use (default: OutlierMethod.NMAD)
+        **kwargs: Additional keyword arguments passed to the filter method
 
     Returns:
-        Tuple[np.ndarray, Window]: The outlier mask and the DEM window.
+        Tuple containing:
+            - np.ndarray: Boolean array identifying outlier pixels (True = outlier)
+            - Window: The DEM window that was processed
+
+        Returns (None, None) if no valid data is found within the boundary
+
+    Raises:
+        ValueError: If an unknown outlier method is specified
     """
     if isinstance(method, str):
-        method = OutlierMethod[method.upper()]
+        try:
+            method = OutlierMethod[method.upper()]
+        except KeyError:
+            logger.error(f"Unknown outlier method: {method}")
+            raise ValueError(f"Unknown outlier method: {method}")
 
+    logger.debug(f"Processing DEM: {dem_path} with method: {method.name}")
     with rasterio.open(dem_path) as src:
         if boundary is not None:
             # Convert dict to GeoDataFrame if needed
@@ -335,6 +254,9 @@ def find_outliers(
             # Read the DEM data within the window
             dem_data = src.read(1, window=window)
             transform = src.window_transform(window)
+            logger.debug(
+                f"Read DEM data with shape {dem_data.shape} from window {window}"
+            )
 
             # Create mask for the geometry (True = inside geometry)
             geometry_mask = features.rasterize(
@@ -354,10 +276,14 @@ def find_outliers(
 
             # Get valid data mask (True = valid data inside geometry)
             valid_mask = geometry_mask & ~nodata_mask
+            valid_count = np.sum(valid_mask)
+            logger.debug(
+                f"Valid pixels in boundary: {valid_count} ({valid_count / valid_mask.size * 100:.2f}%)"
+            )
 
             # If no valid data in the window, return empty mask
             if not np.any(valid_mask):
-                logger.debug("No valid data in geometry")
+                logger.info("No valid data found within the specified boundary")
                 return np.zeros_like(dem_data, dtype=bool), window
 
             # Create a copy of data for filtering
@@ -368,8 +294,10 @@ def find_outliers(
 
         else:
             # Load full DEM
+            logger.debug("No boundary provided, processing entire DEM")
             window = None
             dem_data = src.read(1)
+            logger.debug(f"Loaded full DEM with shape {dem_data.shape}")
 
             # Create mask for nodata values (True = is nodata)
             if src.nodata is not None:
@@ -385,14 +313,18 @@ def find_outliers(
 
             # Valid mask is just the inverse of nodata mask
             valid_mask = ~nodata_mask
+            valid_count = np.sum(valid_mask)
+            logger.debug(
+                f"Valid pixels in DEM: {valid_count} ({valid_count / valid_mask.size * 100:.2f}%)"
+            )
 
     # If there are no valid values to process, return empty mask
     if not np.any(valid_mask):
-        logger.debug("No valid data to process")
+        logger.info("No valid data to process in DEM")
         return np.zeros_like(dem_data, dtype=bool), window
 
     # Apply the appropriate filter to detect outliers
-    # Each filter function should handle NaNs and return a boolean mask
+    logger.info(f"Applying {method.name} filter to detect outliers")
     if method == OutlierMethod.NMAD:
         outliers = _nmad_filter(data_for_filtering, **kwargs)
     elif method == OutlierMethod.DISTANCE:
@@ -401,42 +333,43 @@ def find_outliers(
         outliers = _zscore_filter(data_for_filtering, **kwargs)
     elif method == OutlierMethod.NORMAL:
         outliers = _normal_filter(data_for_filtering, **kwargs)
-    elif method == OutlierMethod.GAUSS_SCIPY:
-        raise NotImplementedError(
-            "Gaussian filter using scipy is not implemented yet. Use GAUSS_CV instead."
-        )
-    elif method == OutlierMethod.GAUSS_CV:
-        raise NotImplementedError(
-            "Gaussian filter using OpenCV is not implemented yet. Use GAUSS_SCIPY instead."
-        )
     else:
+        logger.error(f"Unknown outlier method: {method}")
         raise ValueError(f"Unknown outlier method: {method}")
 
     # Ensure only valid data can be outliers (nodata and outside geometry pixels are not outliers)
     outliers = outliers & valid_mask
+    logger.info(
+        f"Identified {np.sum(outliers)} outliers ({np.sum(outliers) / np.sum(valid_mask) * 100:.2f}% of valid data)"
+    )
 
     return outliers, window
 
 
 def filter_dem_by_geometry(
-    dem_path: Path | str,
-    geometry_path: Path | str,
+    dem_path: Union[Path, str],
+    geometry_path: Union[Path, str],
     method: OutlierMethod = OutlierMethod.NMAD,
     n_jobs: int = -1,
     **kwargs,
-) -> tuple[xdem.DEM, np.ndarray]:
-    """Process multiple glaciers and combine their outlier masks.
+) -> Tuple[xdem.DEM, np.ndarray]:
+    """
+    Process a DEM using multiple geometries (e.g., glacier polygons) and identify outliers.
+
+    This function processes each geometry in the provided file separately and combines
+    the outlier masks into a single result.
 
     Args:
-        dem_path (Path | str): Path to DEM file.
-        geometry_path (Path | str): Path to glacier outlines (GeoJSON).
-        output_path (Path | str): Path to save the output DEM file. Defaults to None.
-        method (OutlierMethod optional): Outlier detection method. Defaults to OutlierMethod.NMAD.
-        n_jobs (int, optional): Number of parallel jobs (-1 for all cores, 1 to process sequentially). Defaults to -1.
-        **kwargs: Additional keyword arguments to be passed to the find_outliers() function.
+        dem_path: Path to DEM file
+        geometry_path: Path to vector file containing geometries (e.g., glacier outlines)
+        method: Outlier detection method to use (default: OutlierMethod.NMAD)
+        n_jobs: Number of parallel jobs (-1 for all cores, 1 for sequential processing)
+        **kwargs: Additional keyword arguments passed to find_outliers()
 
     Returns:
-        Tuple[xdem.DEM, np.ndarray]: The filtered DEM and the final outlier mask.
+        Tuple containing:
+            - xdem.DEM: The filtered DEM with outliers masked as NaN
+            - np.ndarray: Boolean array identifying outlier pixels (True = outlier)
     """
     # Load geometry vector (e.g., glacier outlines)
     with rasterio.open(dem_path) as src:
@@ -444,8 +377,13 @@ def filter_dem_by_geometry(
         dem_shape = src.shape
         geometries = gpd.read_file(geometry_path).to_crs(dem_crs)
 
+    feature_count = len(geometries)
+    logger.info(f"Loaded {feature_count} features from {geometry_path}")
+    logger.info(
+        f"Filtering DEM based on features using {method.name} method with {n_jobs} parallel jobs"
+    )
+
     # Process different geometries in parallel
-    logger.info("Filtering DEM based on elevation bands for each glacier...")
     with logging_redirect_tqdm([logger]):
         results = Parallel(n_jobs=n_jobs, prefer="threads")(
             delayed(find_outliers)(
@@ -454,21 +392,28 @@ def filter_dem_by_geometry(
                 method=method,
                 **kwargs,
             )
-            for feature in tqdm(geometries.iterfeatures(na="drop", show_bbox=True))
+            for feature in tqdm(
+                geometries.iterfeatures(na="drop", show_bbox=True),
+                desc="Processing features",
+                total=feature_count,
+            )
         )
-    logger.info("Finished processing all glaciers. Combining results...")
+    logger.info(f"Finished processing all {feature_count} features")
 
     # Combine results into final mask
     final_mask = np.zeros(dem_shape, dtype=bool)
+    valid_result_count = 0
     for outlier_mask, window in results:
         if outlier_mask is not None and window is not None:
+            valid_result_count += 1
             final_mask[
                 window.row_off : window.row_off + window.height,
                 window.col_off : window.col_off + window.width,
             ] |= outlier_mask
-    logger.info("Combined all glacier masks into final mask.")
+
+    logger.info(f"Combined results from {valid_result_count} features with valid data")
     logger.info(
-        f"Masked {final_mask.sum()} outliers in total ({final_mask.sum() / final_mask.size * 100:.2f}%)."
+        f"Masked {final_mask.sum()} outliers in total ({final_mask.sum() / final_mask.size * 100:.4f}% of all pixels)"
     )
 
     # Apply mask to DEM and save
@@ -479,32 +424,38 @@ def filter_dem_by_geometry(
 
 
 def filter_dem(
-    dem_path: Path | str,
-    boundary_path: Path | str | None = None,
-    method: OutlierMethod | list[OutlierMethod] = OutlierMethod.NMAD,
+    dem_path: Union[Path, str],
+    boundary_path: Optional[Union[Path, str]] = None,
+    method: Union[OutlierMethod, List[OutlierMethod]] = OutlierMethod.NMAD,
     **kwargs,
-) -> tuple[xdem.DEM, np.ndarray]:
+) -> Tuple[xdem.DEM, np.ndarray]:
     """
-    filter_dem Filter a DEM, optionally within a given boundary (e.g. glacier) using outlier detection.
+    Filter a DEM to identify and remove outliers, optionally within a specified boundary.
+
+    This function applies outlier detection to an entire DEM or within a specific boundary.
 
     Args:
-        dem_path (Path | str): Path to DEM file.
-        output_path (Path | str): Path to save the output DEM file. Defaults to None.
-        boundary (gpd.GeoDataFrame | Path | str | None): Boundary geometry to filter the DEM within. Defaults to None.
-        method (OutlierMethod | List[OutlierMethod], optional): Outlier detection method. Defaults to OutlierMethod.NMAD.
+        dem_path: Path to DEM file
+        boundary_path: Optional path to vector file defining the boundary (default: None)
+        method: Outlier detection method or list of methods to apply (default: OutlierMethod.NMAD)
+        **kwargs: Additional keyword arguments passed to find_outliers()
 
     Returns:
-        tuple[xdem.DEM, np.ndarray]: The filtered DEM and the final outlier mask.
+        Tuple containing:
+            - xdem.DEM: The filtered DEM with outliers masked as NaN
+            - np.ndarray: Boolean array identifying outlier pixels (True = outlier)
     """
+    logger.info(f"Filtering DEM {dem_path} using {method} method")
 
     with rasterio.open(dem_path) as src:
         dem_crs = src.crs
         dem_shape = src.shape
 
     if boundary_path is not None:
+        logger.info(f"Using boundary from {boundary_path}")
         boundary = gpd.read_file(boundary_path).to_crs(dem_crs)
-        boundary = boundary.to_crs(dem_crs)
     else:
+        logger.info("No boundary provided, processing entire DEM")
         boundary = None
 
     # Get outlier mask
@@ -515,14 +466,17 @@ def filter_dem(
     # Create final mask
     final_mask = np.zeros(dem_shape, dtype=bool)
     if window is not None:
+        logger.debug(f"Applying outlier mask to window with shape {outlier_mask.shape}")
         final_mask[
             window.row_off : window.row_off + window.height,
             window.col_off : window.col_off + window.width,
         ] = outlier_mask
     else:
+        logger.debug("Applying outlier mask to entire DEM")
         final_mask = outlier_mask
+
     logger.info(
-        f"Masked {final_mask.sum()} outliers in total ({final_mask.sum() / final_mask.size * 100:.2f}%)."
+        f"Masked {final_mask.sum()} outliers in total ({final_mask.sum() / final_mask.size * 100:.4f}% of all pixels)"
     )
 
     # Apply mask to DEM and save
@@ -533,22 +487,38 @@ def filter_dem(
 
 
 def apply_mask_to_dem(
-    dem_path: Path | str,
+    dem_path: Union[Path, str],
     mask: np.ndarray,
-    output_path: Path | str = None,
-) -> None:
-    """Apply a mask to a DEM and save the masked DEM."""
+    output_path: Optional[Union[Path, str]] = None,
+) -> xdem.DEM:
+    """
+    Apply a mask to a DEM, setting masked pixels to NaN, and optionally save the result.
+
+    Args:
+        dem_path: Path to DEM file
+        mask: Boolean array where True indicates pixels to be masked
+        output_path: Optional path to save the masked DEM (default: None)
+
+    Returns:
+        xdem.DEM: The masked DEM object
+    """
+    logger.info(f"Applying mask to DEM {dem_path}")
+    logger.debug(
+        f"Mask has {np.sum(mask)} True values out of {mask.size} pixels ({np.sum(mask) / mask.size * 100:.4f}%)"
+    )
 
     dem = xdem.DEM(dem_path)
     dem.load()
     dem.set_mask(mask)
 
-    # Save masked DEM
+    # Save masked DEM if output path provided
     if output_path is not None:
         output_path = Path(output_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
         dem.save(output_path)
         logger.info(f"Saved masked DEM to {output_path}")
+    else:
+        logger.debug("No output path provided, masked DEM not saved to disk")
 
     return dem
 
