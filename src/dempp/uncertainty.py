@@ -108,7 +108,7 @@ def analyze_dem_uncertainty(
     )
     if output_dir is not None and areas_uncertainty is not None:
         areas_uncertainty.to_csv(
-            path_or_buf=output_dir / "areas_uncertainty.csv", index=False, header=True
+            path_or_buf=output_dir / "areas_uncertainty.csv", index=True, header=True
         )
 
     # Save the analyzer state to a pickle file
