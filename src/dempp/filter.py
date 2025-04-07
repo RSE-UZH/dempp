@@ -490,7 +490,7 @@ def apply_mask_to_dem(
     dem_path: Union[Path, str],
     mask: np.ndarray,
     output_path: Optional[Union[Path, str]] = None,
-) -> xdem.DEM:
+) -> xdem.DEM | None:
     """
     Apply a mask to a DEM, setting masked pixels to NaN, and optionally save the result.
 
@@ -500,7 +500,7 @@ def apply_mask_to_dem(
         output_path: Optional path to save the masked DEM (default: None)
 
     Returns:
-        xdem.DEM: The masked DEM object
+        xdem.DEM: The masked DEM object if output_path is None, otherwise None
     """
     logger.info(f"Applying mask to DEM {dem_path}")
     logger.debug(
@@ -517,10 +517,9 @@ def apply_mask_to_dem(
         output_path.parent.mkdir(parents=True, exist_ok=True)
         dem.save(output_path)
         logger.info(f"Saved masked DEM to {output_path}")
+        return None
     else:
-        logger.debug("No output path provided, masked DEM not saved to disk")
-
-    return dem
+        return dem
 
 
 if __name__ == "__main__":
