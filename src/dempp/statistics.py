@@ -2,6 +2,7 @@
 The functions in this module are kept for backward compatibility and will be removed in future versions.
 """
 
+import concurrent.futures
 import json
 import logging
 from dataclasses import asdict, dataclass
@@ -13,6 +14,7 @@ import geopandas as gpd
 import geoutils as gu
 import matplotlib.pyplot as plt
 import numpy as np
+import rasterio.features
 import xdem
 
 logger = logging.getLogger("dempp")
@@ -127,28 +129,95 @@ def compute_raster_statistics(
 
 
 def compute_area_in_vector(
-    raster: xdem.DEM | gu.Raster, vector: gu.Vector
-) -> tuple[int, float, float]:
+    raster: xdem.DEM | gu.Raster, vector: gu.Vector, per_geometry: bool = False
+) -> tuple[int, float, float] | list[tuple[int, float, float, str]]:
     """Compute the number of valid pixels in a raster within a given vector object.
 
     Args:
-        raster (gu.Raster): Raster object.
-        polygon (gu.Vector): Vector object containing one or multiple polygons.
+        raster (xdem.DEM | gu.Raster): Raster object.
+        vector (gu.Vector): Vector object containing one or multiple polygons.
+        per_geometry (bool, optional): If True, compute statistics for each geometry
+            separately. If False, compute for all geometries together. Defaults to False.
 
     Returns:
-        tuple[int, float, float]: Tuple containing:
-            - pixels: Number of valid pixels in raster within polygon.
-            - area: Area of valid pixels in unit of raster resolution (usually m2).
-            - percentage: Percentage of valid pixels in the polygon.
-
+        tuple[int, float, float] | list[tuple[int, float, float, str]]:
+            If per_geometry is False:
+                Tuple containing:
+                - pixels: Number of valid pixels in raster within polygon.
+                - area: Area of valid pixels in unit of raster resolution (usually m2).
+                - percentage: Percentage of valid pixels in the polygon.
+            If per_geometry is True:
+                List of tuples, each containing:
+                - pixels: Number of valid pixels in raster within polygon.
+                - area: Area of valid pixels in unit of raster resolution (usually m2).
+                - percentage: Percentage of valid pixels in the polygon.
+                - geometry_id: ID or index of the geometry.
     """
     if not isinstance(raster, (xdem.DEM | gu.Raster)):
         raise TypeError("Input raster must be a xdem.DEM or gu.Raster object")
     if not isinstance(vector, gu.Vector):
         raise TypeError("Input vector must be a geoutils.Vector object")
 
-    mask = vector.create_mask(raster)
-    return compute_area_in_mask(raster, inlier_mask=mask)
+    # Process all geometries together (original behavior)
+    if not per_geometry:
+        mask = vector.create_mask(raster)
+        return compute_area_in_mask(raster, inlier_mask=mask)
+
+    # Othwerwise, process each geometry separately
+    # Ensure vector is in the same CRS as raster
+    if vector.crs != raster.crs:
+        vector = vector.reproject(raster)
+
+    # Get raster shape and transform for rasterization
+    out_shape = raster.shape
+    transform = raster.transform
+
+    # Prepare valid data mask from raster
+    valid_data_mask = ~raster.data.mask
+
+    def _process_geometry(idx_row):
+        idx, row = idx_row
+
+        # Identify the geometry ID
+        if "RGIId" in row:
+            geom_id = row["RGIId"]
+        elif "rgi_id" in row:
+            geom_id = row["rgi_id"]
+        else:
+            geom_id = str(idx)
+
+        # Directly rasterize the geometry to a binary mask
+        geometry_mask = rasterio.features.rasterize(
+            [(row.geometry, 1)],
+            out_shape=out_shape,
+            transform=transform,
+            fill=0,
+            dtype=np.uint8,
+        ).astype(bool)
+
+        # Calculate mask overlap with valid data
+        valid_mask = valid_data_mask & geometry_mask
+
+        # Count pixels
+        pixels = valid_mask.sum()
+        total_mask_pixels = geometry_mask.sum()
+        percentage = (
+            round(pixels / total_mask_pixels, 3) if total_mask_pixels > 0 else 0
+        )
+
+        # Calculate area
+        area = pixels * raster.res[0] * raster.res[1]
+
+        return geom_id, (pixels, area, percentage)
+
+    # Use a ThreadPoolExecutor for parallel processing
+    results = {}
+    with concurrent.futures.ThreadPoolExecutor() as executor:
+        future_results = executor.map(_process_geometry, vector.ds.iterrows())
+        for geom_id, result in future_results:
+            results[geom_id] = result
+
+    return results
 
 
 def compute_area_in_mask(
@@ -165,37 +234,6 @@ def compute_area_in_mask(
             - percentage: Percentage of valid pixels in the mask.
     """
 
-    # # Create sample data to test this function
-    # import numpy as np
-    # import pyproj
-    # import rasterio as rio
-
-    # np.random.seed(42)
-    # arr = np.random.randint(0, 255, size=(5, 5), dtype="uint8")
-    # raster_mask = np.random.randint(0, 2, size=(5, 5), dtype="bool")
-    # ma = np.ma.masked_array(data=arr, mask=raster_mask)
-
-    # # Create a raster from array
-    # raster = gu.Raster.from_array(
-    #     data=ma,
-    #     transform=rio.transform.from_bounds(0, 0, 1, 1, 3, 3),
-    #     crs=pyproj.CRS.from_epsg(4326),
-    #     nodata=255,
-    # )
-
-    # inlier_mask = gu.Mask.from_array(
-    #     data=np.array(
-    #         [
-    #             [1, 1, 1, 0, 0],
-    #             [1, 1, 1, 0, 0],
-    #             [0, 0, 0, 0, 0],
-    #             [0, 0, 0, 0, 0],
-    #             [0, 0, 0, 0, 0],
-    #         ]
-    #     ),
-    #     transform=rio.transform.from_bounds(0, 0, 1, 1, 3, 3),
-    #     crs=pyproj.CRS.from_epsg(4326),
-    # )
     if not isinstance(raster, (xdem.DEM | gu.Raster)):
         raise TypeError("Input raster must be a xdem.DEM or gu.Raster object")
     if not isinstance(inlier_mask, gu.Mask):
@@ -211,7 +249,7 @@ def compute_area_in_mask(
     # Count valid (non-masked) pixels and percentage
     pixels = msk.data.sum()
     total_mask_pixels = inlier_mask.data.sum()
-    percentage = pixels / total_mask_pixels
+    percentage = round(pixels / total_mask_pixels, 3) if total_mask_pixels > 0 else 0
 
     # Convert in metric units
     area = pixels * raster.res[0] * raster.res[1]
@@ -503,3 +541,60 @@ def load_stats_from_file(input_file: Path) -> RasterStatistics:
     loaded_stats = {key: float(value) for key, value in loaded_stats.items()}
 
     return RasterStatistics.from_dict(loaded_stats)
+
+
+if __name__ == "__main__":
+    pass
+
+    # Test the compute_area_in_mask function
+
+    # Create sample data to test this function
+    # import numpy as np
+    # import pyproj
+    # import rasterio as rio
+
+    # np.random.seed(42)
+    # arr = np.random.randint(0, 255, size=(5, 5), dtype="uint8")
+    # raster_mask = np.random.randint(0, 2, size=(5, 5), dtype="bool")
+    # ma = np.ma.masked_array(data=arr, mask=raster_mask)
+
+    # # Create a raster from array
+    # raster = gu.Raster.from_array(
+    #     data=ma,
+    #     transform=rio.transform.from_bounds(0, 0, 1, 1, 3, 3),
+    #     crs=pyproj.CRS.from_epsg(4326),
+    #     nodata=255,
+    # )
+
+    # inlier_mask = gu.Mask.from_array(
+    #     data=np.array(
+    #         [
+    #             [1, 1, 1, 0, 0],
+    #             [1, 1, 1, 0, 0],
+    #             [0, 0, 0, 0, 0],
+    #             [0, 0, 0, 0, 0],
+    #             [0, 0, 0, 0, 0],
+    #         ]
+    #     ),
+    #     transform=rio.transform.from_bounds(0, 0, 1, 1, 3, 3),
+    #     crs=pyproj.CRS.from_epsg(4326),
+    # )
+    # if not isinstance(raster, (xdem.DEM | gu.Raster)):
+    #     raise TypeError("Input raster must be a xdem.DEM or gu.Raster object")
+    # if not isinstance(inlier_mask, gu.Mask):
+    #     raise TypeError("Input mask must be a geoutils.Mask object")
+
+    # # Reproject mask to raster CRS
+    # if inlier_mask.transform != raster.transform:
+    #     inlier_mask = inlier_mask.reproject(raster)
+
+    # # Get a boolean mask of valid pixels that are within the polygon
+    # msk = ~raster.data.mask & inlier_mask.data
+
+    # # Count valid (non-masked) pixels and percentage
+    # pixels = msk.data.sum()
+    # total_mask_pixels = inlier_mask.data.sum()
+    # percentage = pixels / total_mask_pixels
+
+    # # Convert in metric units
+    # area = pixels * raster.res[0] * raster.res[1]
