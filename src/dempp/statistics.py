@@ -2,9 +2,9 @@
 The functions in this module are kept for backward compatibility and will be removed in future versions.
 """
 
-import concurrent.futures
 import json
 import logging
+import os
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -16,6 +16,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import rasterio.features
 import xdem
+from joblib import Parallel, delayed
 
 logger = logging.getLogger("dempp")
 
@@ -66,20 +67,20 @@ class RasterStatistics:
 
 
 def compute_raster_statistics(
-    raster: xdem.DEM | gu.Raster,
+    raster: gu.Raster,
     inlier_mask: gu.Mask | None = None,
 ) -> RasterStatistics:
     """Compute statistics for a raster.
+
     Args:
-        raster (xdem.DEM | | gu.Raster | np.ma.MaskedArray | np.ndarray): DEM raster or masked array.
-        mask (gu.Mask | None, optional): Inlier mask where statistics are to be computed.
+        raster (gu.Raster): Raster object to compute statistics for.
+        inlier_mask (gu.Mask | None, optional): Inlier mask where statistics are to be computed.
 
     Returns:
         RasterStatistics: Container with computed statistics.
     """
-    # Convert raster to masked array if necessary
-    if not isinstance(raster, (xdem.DEM | gu.Raster)):
-        raise TypeError("Input raster must be a xdem.DEM or gu.Raster object")
+    if not isinstance(raster, gu.Raster):
+        raise TypeError("Input raster must be a gu.Raster object")
 
     # Apply inlier mask if provided (otherwise keep only valid pixels in raster)
     if inlier_mask is not None:
@@ -89,43 +90,100 @@ def compute_raster_statistics(
         # Compute the number of empty cells and percentage of valid cells
         _, _, valid_cells_perc = compute_area_in_mask(raster, inlier_mask)
 
-        array = raster.data[inlier_mask.data].compressed()
+        # Create masked array using the inlier mask
+        masked_data = np.ma.array(
+            data=raster.data.data,
+            mask=~(~raster.data.mask & inlier_mask.data),
+            copy=False,
+        )
+        array = masked_data.compressed()
     else:
         logger.info("No inlier mask provided. Using all valid pixels.")
         array = raster.data.compressed()
-        valid_cells_perc = -1
+        valid_cells_perc = 1.0  # All valid pixels are being used
 
-    # Convert masked array to Dask array
-    raster_dask = da.from_array(array, chunks="auto")
-
-    # Compute statistics in parallel
-    mean = da.mean(raster_dask)
-    std = da.std(raster_dask)
-    min_val = da.min(raster_dask)
-    max_val = da.max(raster_dask)
-    percentile25 = da.percentile(raster_dask, 25)
-    median = da.percentile(raster_dask, 50)
-    percentile75 = da.percentile(raster_dask, 75)
-
-    # Compute the statistics
-    stats = RasterStatistics(
-        mean=mean.compute(),
-        std=std.compute(),
-        min=min_val.compute(),
-        max=max_val.compute(),
-        percentile25=percentile25.compute()[0],
-        median=median.compute()[0],
-        percentile75=percentile75.compute()[0],
-        nmad=xdem.spatialstats.nmad(raster_dask),
-        valid_percentage=round(valid_cells_perc, 2),
+    # Format the valid percentage for display
+    valid_percentage = (
+        round(valid_cells_perc * 100, 2)
+        if valid_cells_perc <= 1.0
+        else valid_cells_perc
     )
 
-    return stats
+    # Calculate statistics using the shared function
+    return _compute_statistics(array, valid_percentage)
+
+
+def compute_raster_statistics_by_geometry(
+    raster: gu.Raster, vector: gu.Vector, n_jobs: int = -1
+) -> dict[str, RasterStatistics]:
+    """Compute statistics for each geometry in a vector layer using a raster.
+
+    Args:
+        raster (gu.Raster): The raster data to analyze.
+        vector (gu.Vector): Vector layer containing geometries to analyze.
+        n_jobs (int, optional): Number of parallel jobs. Default is -1 (all cores).
+
+    Returns:
+        dict[str, RasterStatistics]: Dictionary with geometry IDs as keys and RasterStatistics as values.
+    """
+
+    def _compute_stats_for_geometry(raster, valid_mask, geometry_mask):
+        """
+        Compute raster statistics for a geometry.
+
+        Args:
+            raster: The raster
+            valid_mask: Mask of valid pixels within geometry
+            geometry_mask: Full geometry mask
+
+        Returns:
+            RasterStatistics: Statistics for this geometry
+        """
+        # Create masked array for this geometry
+        masked_data = np.ma.array(data=raster.data.data, mask=~valid_mask, copy=False)
+
+        # Skip if no valid data
+        if masked_data.count() == 0:
+            logger.debug("No valid data for geometry")
+            return None
+
+        # Get compressed array
+        array = masked_data.compressed()
+
+        # Calculate valid pixel percentage
+        total_mask_pixels = geometry_mask.sum()
+        valid_cells_perc = (
+            round(valid_mask.sum() / total_mask_pixels, 3)
+            if total_mask_pixels > 0
+            else 0
+        )
+
+        # Format the valid percentage for display
+        valid_percentage = round(valid_cells_perc * 100, 2)
+
+        # Calculate statistics using the shared function
+        return _compute_statistics(array, valid_percentage)
+
+    if not isinstance(raster, gu.Raster):
+        raise TypeError("Input raster must be a gu.Raster object")
+    if not isinstance(vector, gu.Vector):
+        raise TypeError("Input vector must be a geoutils.Vector object")
+
+    # Process geometries with the _process_geometries helper function
+    n_jobs = n_jobs if n_jobs != -1 else os.cpu_count() - 1
+    results = _process_geometries(
+        raster=raster,
+        vector=vector,
+        processor_func=_compute_stats_for_geometry,
+        n_jobs=n_jobs,
+    )
+
+    return results
 
 
 def compute_area_in_vector(
     raster: xdem.DEM | gu.Raster, vector: gu.Vector, per_geometry: bool = False
-) -> tuple[int, float, float] | list[tuple[int, float, float, str]]:
+) -> tuple[int, float, float] | dict[str, tuple[int, float, float]]:
     """Compute the number of valid pixels in a raster within a given vector object.
 
     Args:
@@ -135,21 +193,45 @@ def compute_area_in_vector(
             separately. If False, compute for all geometries together. Defaults to False.
 
     Returns:
-        tuple[int, float, float] | list[tuple[int, float, float, str]]:
+        tuple[int, float, float] | dict[str, tuple[int, float, float]]:
             If per_geometry is False:
                 Tuple containing:
                 - pixels: Number of valid pixels in raster within polygon.
                 - area: Area of valid pixels in unit of raster resolution (usually m2).
                 - percentage: Percentage of valid pixels in the polygon.
             If per_geometry is True:
-                List of tuples, each containing:
+                Dictionary with geometry IDs as keys and tuples as values, each containing:
                 - pixels: Number of valid pixels in raster within polygon.
                 - area: Area of valid pixels in unit of raster resolution (usually m2).
                 - percentage: Percentage of valid pixels in the polygon.
-                - geometry_id: ID or index of the geometry.
     """
-    if not isinstance(raster, (xdem.DEM | gu.Raster)):
-        raise TypeError("Input raster must be a xdem.DEM or gu.Raster object")
+
+    def _compute_area_for_geometry(raster, valid_mask, geometry_mask):
+        """
+        Compute area statistics for a geometry.
+
+        Args:
+            raster: The raster
+            valid_mask: Mask of valid pixels within geometry
+            geometry_mask: Full geometry mask
+
+        Returns:
+            tuple: (pixels, area, percentage)
+        """
+        # Count pixels
+        pixels = valid_mask.sum()
+        total_mask_pixels = geometry_mask.sum()
+        percentage = (
+            round(pixels / total_mask_pixels, 3) if total_mask_pixels > 0 else 0
+        )
+
+        # Calculate area
+        area = pixels * raster.res[0] * raster.res[1]
+
+        return (pixels, area, percentage)
+
+    if not isinstance(raster, gu.Raster):
+        raise TypeError("Input raster must be a geoutils.Raster object")
     if not isinstance(vector, gu.Vector):
         raise TypeError("Input vector must be a geoutils.Vector object")
 
@@ -158,7 +240,102 @@ def compute_area_in_vector(
         mask = vector.create_mask(raster)
         return compute_area_in_mask(raster, inlier_mask=mask)
 
-    # Othwerwise, process each geometry separately
+    # Otherwise, process each geometry separately using the shared helper function
+    results = _process_geometries(
+        raster=raster, vector=vector, processor_func=_compute_area_for_geometry
+    )
+
+    return results
+
+
+def _compute_statistics(
+    array: np.ndarray, valid_percentage: float, use_dask: bool = True
+) -> RasterStatistics:
+    """
+    Core function to calculate statistics from a numpy array.
+
+    Args:
+        array: Compressed numpy array (no masked values)
+        valid_percentage: Percentage of valid pixels
+        use_dask: Whether to use Dask for parallel computation. Default is True.
+
+    Returns:
+        RasterStatistics: Object containing calculated statistics
+    """
+    if use_dask and len(array) > 10000:  # Only use Dask for larger arrays
+        # Create Dask array for efficient computation
+        raster_dask = da.from_array(array, chunks="auto")
+
+        # Create all computation tasks without executing them yet
+        mean_task = da.mean(raster_dask)
+        std_task = da.std(raster_dask)
+        min_task = da.min(raster_dask)
+        max_task = da.max(raster_dask)
+        percentile25_task = da.percentile(raster_dask, 25)
+        median_task = da.percentile(raster_dask, 50)
+        percentile75_task = da.percentile(raster_dask, 75)
+
+        # Execute all tasks at once using Dask's optimized scheduler
+        mean, std, min_val, max_val, percentile25, median, percentile75 = da.compute(
+            mean_task,
+            std_task,
+            min_task,
+            max_task,
+            percentile25_task,
+            median_task,
+            percentile75_task,
+        )
+    else:
+        # Use NumPy directly for small arrays or when Dask is not requested
+        mean = np.mean(array)
+        std = np.std(array)
+        min_val = np.min(array)
+        max_val = np.max(array)
+        percentile25 = np.percentile(array, 25)
+        median = np.percentile(array, 50)
+        percentile75 = np.percentile(array, 75)
+
+    # Handle array-like percentile outputs
+    percentile25_val = (
+        percentile25[0] if hasattr(percentile25, "__len__") else percentile25
+    )
+    median_val = median[0] if hasattr(median, "__len__") else median
+    percentile75_val = (
+        percentile75[0] if hasattr(percentile75, "__len__") else percentile75
+    )
+
+    # Always compute NMAD with direct NumPy since it's a specialized function
+    nmad_val = xdem.spatialstats.nmad(array)
+
+    # Create the statistics object
+    stats = RasterStatistics(
+        mean=mean,
+        std=std,
+        min=min_val,
+        max=max_val,
+        percentile25=percentile25_val,
+        median=median_val,
+        percentile75=percentile75_val,
+        nmad=nmad_val,
+        valid_percentage=valid_percentage,
+    )
+
+    return stats
+
+
+def _process_geometries(raster, vector, processor_func, n_jobs=None):
+    """
+    Process each geometry in a vector with a given function.
+
+    Args:
+        raster: The raster to process
+        vector: The vector containing geometries
+        processor_func: Function to apply to each geometry
+        n_jobs: Number of parallel jobs
+
+    Returns:
+        dict: Results with geometry IDs as keys
+    """
     # Ensure vector is in the same CRS as raster
     if vector.crs != raster.crs:
         vector = vector.reproject(raster)
@@ -178,6 +355,8 @@ def compute_area_in_vector(
             geom_id = row["RGIId"]
         elif "rgi_id" in row:
             geom_id = row["rgi_id"]
+        elif "glacier_id" in row:
+            geom_id = row["glacier_id"]
         else:
             geom_id = str(idx)
 
@@ -193,25 +372,20 @@ def compute_area_in_vector(
         # Calculate mask overlap with valid data
         valid_mask = valid_data_mask & geometry_mask
 
-        # Count pixels
-        pixels = valid_mask.sum()
-        total_mask_pixels = geometry_mask.sum()
-        percentage = (
-            round(pixels / total_mask_pixels, 3) if total_mask_pixels > 0 else 0
-        )
+        # Process with the provided function
+        result = processor_func(raster, valid_mask, geometry_mask)
 
-        # Calculate area
-        area = pixels * raster.res[0] * raster.res[1]
+        return geom_id, result
 
-        return geom_id, (pixels, area, percentage)
-
-    # Use a ThreadPoolExecutor for parallel processing
+    # Process geometries in parallel
     results = {}
-    with concurrent.futures.ThreadPoolExecutor() as executor:
-        future_results = executor.map(_process_geometry, vector.ds.iterrows())
-        for geom_id, result in future_results:
-            results[geom_id] = result
-
+    geometry_rows = list(vector.ds.iterrows())
+    results_list = Parallel(n_jobs=n_jobs, backend="threading")(
+        delayed(_process_geometry)(idx_row) for idx_row in geometry_rows
+    )
+    results = {
+        geom_id: result for geom_id, result in results_list if result is not None
+    }
     return results
 
 
