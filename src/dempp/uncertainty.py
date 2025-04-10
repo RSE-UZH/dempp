@@ -1,7 +1,7 @@
 import logging
-import pickle
 from pathlib import Path
 
+import cloudpickle
 import geoutils as gu
 import numpy as np
 import pandas as pd
@@ -164,7 +164,7 @@ class DEMUncertaintyAnalyzer:
         path.parent.mkdir(parents=True, exist_ok=True)
         try:
             with open(path, "wb") as f:
-                pickle.dump(self, f)
+                cloudpickle.dump(self, f)
             return True
         except Exception as e:
             logger.error(f"Failed to save to {path}: {e}")
@@ -187,7 +187,7 @@ class DEMUncertaintyAnalyzer:
 
         try:
             with open(path, "rb") as f:
-                return pickle.load(f)
+                return cloudpickle.load(f)
         except Exception as e:
             logger.error(f"Failed to load from {path}: {e}")
             raise
@@ -859,6 +859,10 @@ class DEMUncertaintyAnalyzer:
         if work_vector.crs.is_geographic:
             logger.debug("Converting vector from geographic to projected CRS")
             work_vector = work_vector.to_crs(crs=work_vector.ds.estimate_utm_crs())
+
+        # Get raster shape and transform for rasterization
+        out_shape = self.ref_dem.shape
+        transform = self.ref_dem.transform
 
         # Initialize results dictionary
         results = {}

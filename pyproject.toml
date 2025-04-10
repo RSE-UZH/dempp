@@ -36,6 +36,7 @@ dependencies = [
     "seaborn",
     "graphviz",
     "cmcrameri",
+    "cloudpickle",
 ]
 
 [project.urls]
