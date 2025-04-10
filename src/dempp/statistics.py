@@ -68,13 +68,11 @@ class RasterStatistics:
 def compute_raster_statistics(
     raster: xdem.DEM | gu.Raster,
     inlier_mask: gu.Mask | None = None,
-    output_file: Path | None = None,
 ) -> RasterStatistics:
     """Compute statistics for a raster.
     Args:
         raster (xdem.DEM | | gu.Raster | np.ma.MaskedArray | np.ndarray): DEM raster or masked array.
         mask (gu.Mask | None, optional): Inlier mask where statistics are to be computed.
-        output_file (Path | None, optional): Path to save statistics JSON file.
 
     Returns:
         RasterStatistics: Container with computed statistics.
@@ -121,9 +119,6 @@ def compute_raster_statistics(
         nmad=xdem.spatialstats.nmad(raster_dask),
         valid_percentage=round(valid_cells_perc, 2),
     )
-
-    if output_file is not None:
-        stats.save(output_file)
 
     return stats
 
