@@ -289,7 +289,7 @@ class DEMUncertaintyAnalyzer:
             stats = self.dh.get_stats(inlier_mask=self.stable_mask)
             logger.info("Elevation difference statistics:")
             for key, value in stats.items():
-                logger.info(f"\t{key}: {value}")
+                logger.info(f"\t{key}: {value:.2f}")
         else:
             stats = None
 
@@ -814,13 +814,13 @@ class DEMUncertaintyAnalyzer:
             work_vector = self.glacier_outlines.copy()
             logger.debug("Using stored glacier outlines")
         else:
-            if isinstance(area_vector, (str, Path)):
+            if isinstance(area_vector, str | Path):
                 try:
                     area_vector = gu.Vector(area_vector)
                 except Exception as e:
                     raise ValueError(
                         f"Failed to load area vector from {area_vector}: {e}"
-                    )
+                    ) from e
             elif not isinstance(area_vector, gu.Vector):
                 raise ValueError(
                     "area_vector must be a geoutils.Vector or a path to a vector file."
