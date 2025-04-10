@@ -104,6 +104,8 @@ def differenciate_dems(
     resampling: str = "bilinear",
     xlim: tuple[float, float] | None = None,
     plt_cfg: dict[str, Any] | None = None,
+    plt_min_percentile: float = 0.01,
+    plt_max_percentile: float = 99.99,
 ) -> tuple[xdem.DEM, RasterStatistics]:
     """Process two DEMs to create a difference DEM with statistics.
 
@@ -161,7 +163,8 @@ def differenciate_dems(
             output_prefix = f"{Path(dem.name).stem}__{Path(reference.name).stem}"
 
         # Save difference DEM and statistics
-        stats.save(output_dir / f"{output_prefix}_stats.json")
+        stb_str = "stableterrain_" if mask is not None else ""
+        stats.save(output_dir / f"{output_prefix}_{stb_str}stats.json")
         dod.save(output_dir / f"{output_prefix}_dod.tif")
         logger.info(f"Saved difference DEM and statistics to: {output_dir}")
 
@@ -174,10 +177,12 @@ def differenciate_dems(
                 else dod.data.compressed()
             )
             # Remove extreme quantiles
-            q1 = np.percentile(plot_data, 0.01)
-            q2 = np.percentile(plot_data, 99.99)
+            q1 = np.percentile(plot_data, plt_min_percentile)
+            q2 = np.percentile(plot_data, plt_max_percentile)
             plot_data = plot_data[(plot_data > q1) & (plot_data < q2)]
-            logger.info("Removed extreme quantiles (<0.01% and >99.99%) for plotting")
+            logger.info(
+                f"Removed extreme quantiles (<{plt_min_percentile:.3%} and >{plt_max_percentile:.3%}) for plotting"
+            )
 
             plot_path = output_dir / f"{output_prefix}_plot.png"
             plt_cfg = plt_cfg or {}
