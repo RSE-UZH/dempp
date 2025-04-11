@@ -873,10 +873,6 @@ class UncertaintyAnalyzer:
             logger.debug("Converting vector from geographic to projected CRS")
             work_vector = work_vector.to_crs(crs=work_vector.ds.estimate_utm_crs())
 
-        # Get raster shape and transform for rasterization
-        out_shape = self.ref_dem.shape
-        transform = self.ref_dem.transform
-
         # Initialize results dictionary
         results = {}
 
