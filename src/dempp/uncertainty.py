@@ -27,6 +27,8 @@ def analyze_dem_uncertainty(
     dem_path: str | Path,
     stable_mask_path: str | Path,
     glacier_outlines_path: str | Path,
+    compute_terrain_features: bool = True,
+    attibute_list: list[str] = None,
     additional_predictors: dict[str, Path | str] = None,
     subsample_res: int = None,
     output_dir: str | Path = None,
@@ -76,9 +78,12 @@ def analyze_dem_uncertainty(
     analyzer.compute_elevation_difference(get_statistics=True)
 
     # Extract terrain features
-    analyzer.extract_terrain_features(
-        attribute=["slope", "maximum_curvature"], compute_abs_maxc=True
-    )
+    if compute_terrain_features:
+        if attibute_list is None:
+            attibute_list = ["slope", "maximum_curvature"]
+        analyzer.extract_terrain_features(
+            attribute=attibute_list, compute_abs_maxc=True
+        )
 
     # Analyze heteroscedasticity
     analyzer.analyze_heteroscedasticity()
@@ -311,12 +316,11 @@ class UncertaintyAnalyzer:
         Returns:
             UncertaintyAnalyzer: The instance of the analyzer.
         """
-        logger.info("Extracting terrain features...")
+        logger.info(f"Extracting terrain features: {attribute}...")
         if attribute is None:
             attribute = ["slope", "maximum_curvature"]
 
         # Compute slope and maximum curvature
-        logger.debug(f"Computing terrain attributes: {attribute}")
         outs = xdem.terrain.get_terrain_attribute(self.ref_dem, attribute=attribute)
 
         # Stores the terrain features in the predictors dictionary
@@ -327,7 +331,7 @@ class UncertaintyAnalyzer:
                 data = np.abs(data)
             self.predictors[key] = data
 
-        logger.info("Terrain features extracted.")
+        logger.info(f"Terrain features extracted successfully: {attribute}")
         return self
 
     def prepare_stable_terrain_data(
@@ -377,9 +381,11 @@ class UncertaintyAnalyzer:
     def analyze_heteroscedasticity(
         self,
         nmad_factor: int = 5,
-        statistics: list[str] = None,
         list_var_bins: list[float] = None,
         list_ranges: list[float] = None,
+        statistics: list[str] = None,
+        nd_binning_statistic: str = "nmad",
+        nd_binning_min_count: int = 100,
     ) -> tuple:
         """
         Analyze error heteroscedasticity and create error function.
@@ -417,6 +423,7 @@ class UncertaintyAnalyzer:
             statistics = ["count", np.nanmedian, xdem.spatialstats.nmad]
 
         # Compute n-d binning with all the predictors
+        logger.info("Computing n-d binning of the predictors...")
         df = xdem.spatialstats.nd_binning(
             values=dh_arr,
             list_var=predictor_list,
@@ -427,19 +434,24 @@ class UncertaintyAnalyzer:
         )
 
         # Fit error model
+        logger.info("Fitting error model on the predictors...")
         unscaled_dh_err_fun = xdem.spatialstats.interp_nd_binning(
-            df, list_var_names=var_names, statistic="nmad", min_count=50
+            df,
+            list_var_names=var_names,
+            statistic=nd_binning_statistic,
+            min_count=nd_binning_min_count,
         )
 
         # Compute the mean predicted elevation error on the stable terrain
         dh_err_stable = unscaled_dh_err_fun(
             tuple([stable_data[key] for key in var_names])
         )
-        print(
+        logger.info(
             f"The spread of elevation difference is {xdem.spatialstats.nmad(dh_arr):.2f} compared to a mean predicted elevation error of {np.nanmean(dh_err_stable):.2f}."
         )
 
         # Two-step standardization
+        logger.info("Standardizing the predicted errors...")
         zscores, dh_err_fun = xdem.spatialstats.two_step_standardization(
             dvalues=dh_arr,
             list_var=predictor_list,
@@ -447,6 +459,7 @@ class UncertaintyAnalyzer:
         )
 
         # Compute the error function for the whole DEM
+        logger.info("Computing the error function for the whole DEM...")
         sigma_dh = self.dh.copy(
             new_array=dh_err_fun(
                 tuple([self.predictors[key].data for key in var_names])
@@ -926,7 +939,7 @@ class UncertaintyAnalyzer:
                 "uncertainty": sig_dh_area,
             }
 
-            logger.info(f"Completed uncertainty calculation for {len(results)} area(s)")
+            logger.info(f"Completed uncertainty calculation for area {area_id}")
 
         # Convert the results to a dataframe
         results_df = pd.DataFrame.from_dict(results, orient="index")
