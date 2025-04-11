@@ -54,13 +54,13 @@ def analyze_dem_uncertainty(
 
     Returns:
         Dict with the following keys:
-            - analyzer: The DEMUncertaintyAnalyzer instance
+            - analyzer: The UncertaintyAnalyzer instance
             - dh: The elevation difference raster
             - sigma_dh: The estimated uncertainty raster
             - area_result: Results for specific area (if area_name was provided)
     """
     # Initialize analyzer
-    analyzer = DEMUncertaintyAnalyzer()
+    analyzer = UncertaintyAnalyzer()
 
     # Load data
     analyzer.load_data(
@@ -123,7 +123,7 @@ def analyze_dem_uncertainty(
     }
 
 
-class DEMUncertaintyAnalyzer:
+class UncertaintyAnalyzer:
     """
     A class to analyze uncertainty in Digital Elevation Models.
     """
@@ -171,7 +171,7 @@ class DEMUncertaintyAnalyzer:
             return False
 
     @classmethod
-    def from_pickle(cls, path: Path | str) -> "DEMUncertaintyAnalyzer":
+    def from_pickle(cls, path: Path | str) -> "UncertaintyAnalyzer":
         """
         Load the analyzer state from a pickle file.
 
@@ -179,7 +179,7 @@ class DEMUncertaintyAnalyzer:
             path (Path | str): Path to the pickle file.
 
         Returns:
-            DEMUncertaintyAnalyzer: Loaded instance of the analyzer.
+            UncertaintyAnalyzer: Loaded instance of the analyzer.
         """
         path = Path(path)
         if not path.exists():
@@ -201,7 +201,7 @@ class DEMUncertaintyAnalyzer:
         subsample_res: int = None,
         no_data_value: float = -9999,
         additional_predictors: dict[str, Path | str] = None,
-    ) -> "DEMUncertaintyAnalyzer":
+    ) -> "UncertaintyAnalyzer":
         """
         Load and prepare all necessary data.
 
@@ -215,7 +215,7 @@ class DEMUncertaintyAnalyzer:
             additional_predictors (dict[str, Path | str], optional): Additional predictors.
 
         Returns:
-            DEMUncertaintyAnalyzer: The instance of the analyzer.
+            UncertaintyAnalyzer: The instance of the analyzer.
         """
         logger.info("Loading data...")
         self.ref_dem_path = Path(ref_dem_path)
@@ -239,31 +239,31 @@ class DEMUncertaintyAnalyzer:
 
         # Subsample if resolution specified
         if self.subsample_res:
-            self.ref_dem = self.ref_dem.reproject(res=self.subsample_res)
+            self.dem.reproject(
+                res=self.subsample_res, resampling="bilinear", inplace=True
+            )
 
-        # Reproject the DEM to the reference DEM
-        self.dem = self.dem.reproject(self.ref_dem, resampling="bilinear")
+        # Reproject the reference DEM to the DEM
+        self.ref_dem.reproject(self.dem, resampling="bilinear", inplace=True)
 
         # Load glacier outlines if provided
         if self.glacier_outlines_path:
-            self.glacier_outlines = gu.Vector(self.glacier_outlines_path).crop(
-                self.ref_dem
-            )
-            self.glacier_mask = self.glacier_outlines.create_mask(self.ref_dem)
+            self.glacier_outlines = gu.Vector(self.glacier_outlines_path).crop(self.dem)
+            self.glacier_mask = self.glacier_outlines.create_mask(self.dem)
 
         # Load stable area mask if provided
         if self.stable_mask_path:
             stable_mask_raster = gu.Raster(self.stable_mask_path)
             stable_mask_raster.set_nodata(255)
-            stable_mask_raster.reproject(
-                self.ref_dem, resampling="nearest", inplace=True
-            )
+            stable_mask_raster.reproject(self.dem, resampling="nearest", inplace=True)
             self.stable_mask = stable_mask_raster == 1
 
         # Load other data if provided (e.g., correlation value map)
         if additional_predictors:
             for key, value in additional_predictors.items():
-                self.predictors[key] = gu.Raster(value).reproject(self.ref_dem)
+                self.predictors[key] = gu.Raster(value).reproject(
+                    self.dem, resampling="bilinear"
+                )
 
         logger.info("Data loaded successfully.")
         return self
@@ -300,7 +300,7 @@ class DEMUncertaintyAnalyzer:
         self,
         attribute: list[str] = None,
         compute_abs_maxc: bool = True,
-    ) -> "DEMUncertaintyAnalyzer":
+    ) -> "UncertaintyAnalyzer":
         """
         Extract terrain features to be used as predictors for uncertainty.
 
@@ -309,7 +309,7 @@ class DEMUncertaintyAnalyzer:
             compute_abs_maxc (bool, optional): Whether to compute absolute value of the maximum curvature.
 
         Returns:
-            DEMUncertaintyAnalyzer: The instance of the analyzer.
+            UncertaintyAnalyzer: The instance of the analyzer.
         """
         logger.info("Extracting terrain features...")
         if attribute is None:
