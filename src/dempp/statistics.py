@@ -7,7 +7,7 @@ import logging
 import os
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, overload
 
 import dask.array as da
 import geopandas as gpd
@@ -181,8 +181,26 @@ def compute_raster_statistics_by_geometry(
     return results
 
 
+@overload
 def compute_area_in_vector(
-    raster: xdem.DEM | gu.Raster, vector: gu.Vector, per_geometry: bool = False
+    raster: xdem.DEM | gu.Raster,
+    vector: gu.Vector,
+    per_geometry: Literal[False] = False,
+) -> tuple[int, float, float]: ...
+
+
+@overload
+def compute_area_in_vector(
+    raster: xdem.DEM | gu.Raster,
+    vector: gu.Vector,
+    per_geometry: Literal[True],
+) -> dict[str, tuple[int, float, float]]: ...
+
+
+def compute_area_in_vector(
+    raster: xdem.DEM | gu.Raster,
+    vector: gu.Vector,
+    per_geometry: bool = False,
 ) -> tuple[int, float, float] | dict[str, tuple[int, float, float]]:
     """Compute the number of valid pixels in a raster within a given vector object.
 

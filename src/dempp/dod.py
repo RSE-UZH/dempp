@@ -105,7 +105,7 @@ def differenciate_dems(
     xlim: tuple[float, float] | None = None,
     plt_cfg: dict[str, Any] | None = None,
     plt_min_percentile: float = 0.01,
-    plt_max_percentile: float = 99.99,
+    plt_max_percentile: float = 0.99,
 ) -> tuple[xdem.DEM, RasterStatistics]:
     """Process two DEMs to create a difference DEM with statistics.
 
