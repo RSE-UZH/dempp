@@ -2,11 +2,16 @@ import logging
 from pathlib import Path
 
 import cloudpickle
+import geopandas as gpd
 import geoutils as gu
 import numpy as np
 import pandas as pd
 import xdem
+from geoutils import Vector
+from joblib import Parallel, delayed
 from matplotlib import pyplot as plt
+from shapely.geometry import shape
+from tqdm import tqdm
 from xdem.spatialstats import nmad
 
 # Initialize logger with propagate=False to prevent double logging
@@ -36,6 +41,8 @@ def analyze_dem_uncertainty(
     column_name: str = "rgi_id",
     area_name: str | list[str] = None,
     min_area_fraction: float = 0.05,
+    neff_args: dict | None = None,
+    save_intermediate: bool = False,
 ) -> dict:
     """Analyze DEM uncertainty and return results.
 
@@ -57,9 +64,7 @@ def analyze_dem_uncertainty(
     Returns:
         Dict with the following keys:
             - analyzer: The UncertaintyAnalyzer instance
-            - dh: The elevation difference raster
-            - sigma_dh: The estimated uncertainty raster
-            - area_result: Results for specific area (if area_name was provided)
+            - area_result: DataFrame with uncertainty results for each area, if area_vector is provided, otherwise None.
     """
     # Initialize analyzer
     analyzer = UncertaintyAnalyzer()
@@ -96,6 +101,9 @@ def analyze_dem_uncertainty(
         analyzer.plot_error_map(path=output_dir / "predicted_error_map.png")
         analyzer.sigma_dh.save(output_dir / "predicted_error.tif")
 
+    if save_intermediate and output_dir is not None:
+        analyzer.to_pickle(output_dir / "analyzer_state_intermediate.pkl")
+
     # Analyze spatial correlation
     analyzer.analyze_spatial_correlation()
     if output_dir is not None:
@@ -103,27 +111,36 @@ def analyze_dem_uncertainty(
         analyzer.variogram_params.to_csv(
             path_or_buf=output_dir / "variogram_params.csv", index=False, header=True
         )
+    if save_intermediate and output_dir is not None:
+        analyzer.to_pickle(output_dir / "analyzer_state_intermediate.pkl")
 
     # Compute uncertainty for specific area
-    areas_uncertainty = analyzer.compute_uncertainty_for_area(
-        area_vector=area_vector,
-        column_name=column_name,
-        area_name=area_name,
-        min_area_fraction=min_area_fraction,
-    )
-    if output_dir is not None and areas_uncertainty is not None:
-        areas_uncertainty.to_csv(
-            path_or_buf=output_dir / "areas_uncertainty.csv", index=True, header=True
+    if area_vector is not None:
+        areas_uncertainty = analyzer.compute_uncertainty_for_area(
+            area_vector=area_vector,
+            column_name=column_name,
+            area_name=area_name,
+            min_area_fraction=min_area_fraction,
+            neff_args=neff_args,
+            n_jobs=1,
         )
+        if output_dir is not None and areas_uncertainty is not None:
+            areas_uncertainty.to_csv(
+                path_or_buf=output_dir / "areas_uncertainty.csv",
+                index=True,
+                header=True,
+            )
+    else:
+        areas_uncertainty = None
 
     # Save the analyzer state to a pickle file
     if output_dir is not None:
-        analyzer.to_pickle(output_dir / "analyzer_state.pkl")
+        analyzer.to_pickle(output_dir / "uncertainty_analyzer_state.pkl")
+        if save_intermediate:
+            (output_dir / "analyzer_state_intermediate.pkl").unlink(missing_ok=True)
 
     return {
         "analyzer": analyzer,
-        "dh": analyzer.dh,
-        "sigma_dh": analyzer.sigma_dh,
         "area_result": areas_uncertainty,
     }
 
@@ -138,12 +155,12 @@ class UncertaintyAnalyzer:
         Initialize the uncertainty analyzer with paths to required data.
         """
         # Data containers
-        self.ref_dem = None
-        self.dem = None
-        self.dh = None
-        self.stable_mask = None
-        self.glacier_outlines = None
-        self.glacier_mask = None
+        self.ref_dem: xdem.DEM | None = None
+        self.dem: xdem.DEM | None = None
+        self.dh: xdem.DEM | None = None
+        self.stable_mask: gu.Mask | None = None
+        self.glacier_outlines: gu.Vector | None = None
+        self.glacier_mask: gu.Mask | None = None
 
         # Heteroscedasticity analysis
         self.predictors = {}
@@ -234,12 +251,12 @@ class UncertaintyAnalyzer:
 
         # Load reference DEM
         self.ref_dem = xdem.DEM(self.ref_dem_path)
-        self.ref_dem.set_area_or_point("area")
+        self.ref_dem.set_area_or_point("Area")
         self.ref_dem.set_nodata(self.no_data_value)
 
         # Load DEM to analyze
         self.dem = xdem.DEM(self.dem_path)
-        self.dem.set_area_or_point("area")
+        self.dem.set_area_or_point("Area")
         self.dem.set_nodata(self.no_data_value)
 
         # Subsample if resolution specified
@@ -658,9 +675,9 @@ class UncertaintyAnalyzer:
     def analyze_spatial_correlation(
         self,
         standardize: bool = True,
-        n_samples: int = 5000,
+        n_samples: int = 1000,
         subsample_method: str = "cdist_equidistant",
-        n_variograms: int = 5,
+        n_variograms: int = 3,
         estimator: str = "dowd",
         random_state: int = None,
         list_models: list[str] = None,
@@ -780,11 +797,13 @@ class UncertaintyAnalyzer:
 
     def compute_uncertainty_for_area(
         self,
-        area_vector: gu.Vector | Path = None,
+        area_vector: gu.Vector | Path | None = None,
         column_name: str = "rgi_id",
-        area_name: str | list[str] = None,
+        area_name: str | list[str] | None = None,
         min_area_fraction: float = 0.05,
-    ) -> dict:
+        neff_args: dict | None = None,
+        n_jobs: int = 1,
+    ) -> pd.DataFrame:
         """Compute uncertainty for specific area(s) (e.g., glaciers).
 
         This function computes the uncertainty for one or multiple areas. It calculates
@@ -796,15 +815,11 @@ class UncertaintyAnalyzer:
             column_name (str, optional): Column name in the vector dataset to use for area identification. Defaults to "rgi_id".
             area_name (str | list[str], optional): Name/ID(s) for the area(s) to analyze. If provided, only areas matching these IDs will be processed. Otherwise, all areas in the vector will be processed.
             min_area_fraction (float, optional): Minimum area percentage to consider for uncertainty analysis. Defaults to 0.05 (5% of the area).
+            neff_args (dict | None, optional): Additional arguments for the effective number of samples calculation to pass to the number_effective_samples() function. Check xdem documentation for more details. If None, default values are used.
+            n_jobs (int, optional): Number of parallel jobs to use for processing. If 1, processing is done sequentially. Defaults to 1.
 
         Returns:
-            dict: Dictionary with area names/IDs as keys and uncertainty results as values.
-                Each result contains:
-                - area: The area vector
-                - mean_elevation_diff: Mean elevation difference in the area
-                - mean_uncertainty_unscaled: Mean uncertainty in the area
-                - effective_samples: Effective number of samples in the area
-                - uncertainty: Standard error of the mean elevation difference
+            pd.DataFrame: DataFrame containing the results for each area, including mean elevation difference, mean uncertainty, and effective number of samples.
 
         Raises:
             ValueError: If spatial correlation has not been analyzed yet.
@@ -873,26 +888,24 @@ class UncertaintyAnalyzer:
             logger.debug("Converting vector from geographic to projected CRS")
             work_vector = work_vector.to_crs(crs=work_vector.ds.estimate_utm_crs())
 
-        # Initialize results dictionary
-        results = {}
-
-        # Process each geometry in the vector
-        for idx, row in work_vector.ds.iterrows():
-            # Get area identifier from column
+        # Helper function to process a single area
+        def _process_single_area(idx_row_tuple):
+            """Process a single area to compute uncertainty."""
+            idx, row = idx_row_tuple
             area_id = row[column_name]
             logger.info(f"Processing area: {area_id}")
 
-            # Extract single geometry
-            single_geom = work_vector.copy()
-            single_geom.ds = single_geom.ds.iloc[[idx]]
-
-            # Create mask for the current geometry
+            # Extract the geometry without copying the entire vector
+            geom = shape(work_vector.ds.iloc[idx].geometry)
+            single_geom = Vector(
+                gpd.GeoDataFrame({"geometry": [geom]}, crs=work_vector.crs)
+            )
             area_mask = single_geom.create_mask(self.ref_dem)
 
             # Check if the mask contains any valid pixels
             if not np.any(area_mask):
                 logger.warning(f"Area {area_id} has no valid pixels - skipping")
-                continue
+                return None
 
             # Check if the DEM covers at least min_area_fraction of the area
             dem_px_in_area = len(self.dh[area_mask].compressed())
@@ -901,51 +914,85 @@ class UncertaintyAnalyzer:
                 logger.info(
                     f"DEM {self.dem_path.name} covers only {area_coverage:.2%} of the area {area_id}. It's less than the minimum fraction {min_area_fraction:.2%} - skipping"
                 )
-                continue
+                return None
 
-            # Compute the mean elevation difference in the area and the mean error
+            # Compute the mean elevation difference in the area and the mean sigma
             dh_area = np.nanmean(self.dh[area_mask])
             mean_sig = np.nanmean(self.sigma_dh[area_mask])
-            logger.info(
-                f"Area {area_id}: Mean elevation difference: {dh_area:.2f} ± {mean_sig:.2f} m"
-            )
 
             # Calculate effective number of samples
             n_eff = xdem.spatialstats.number_effective_samples(
                 area=single_geom,
                 params_variogram_model=self.variogram_params,
-                # rasterize_resolution=10,
+                **neff_args or {},
             )
-            logger.info(f"Area {area_id}: Effective number of samples: {n_eff:.2f}")
 
             # Rescale the standard deviation of the mean elevation difference with the effective number of samples
-            sig_dh_area = mean_sig / np.sqrt(n_eff)
+            sig_dh_area = (
+                mean_sig / np.sqrt(n_eff) if n_eff > 0 else np.nan
+            )  # Avoid division by zero or sqrt of negative
             err_perc = (
-                sig_dh_area / abs(dh_area) * 100 if dh_area != 0 else float("inf")
+                sig_dh_area / abs(dh_area) * 100
+                if dh_area != 0 and not np.isnan(sig_dh_area)
+                else float("inf")
             )
             logger.info(
-                f"Area {area_id}: Random error for mean elevation change: {sig_dh_area:.2f} m ({err_perc:.2f}%)"
+                f"Area {area_id}: Mean elevation difference: {dh_area:.2f} ± {sig_dh_area:.2f} m ({err_perc:.2f}%) - neff samples: {n_eff:.2f}.",
             )
 
-            # Store results for this geometry using the area_id as key
-            results[area_id] = {
+            logger.info(f"Completed uncertainty calculation for area {area_id}")
+            return area_id, {
                 "mean_elevation_diff": dh_area,
                 "mean_uncertainty_unscaled": mean_sig,
+                "area": single_geom.area.iloc[0],
                 "effective_samples": n_eff,
                 "uncertainty": sig_dh_area,
             }
 
-            logger.info(f"Completed uncertainty calculation for area {area_id}")
+        # Process each geometry in the vector in parallel
+        # We iterate over items of ds.iterrows() which yields (index, Series)
+        # To make it picklable for joblib, we pass the index and a dictionary representation of the row. However, work_vector.ds.iloc[[idx]] inside the helper function is more robust.
+        tasks = list(work_vector.ds.iterrows())
+        try:
+            logger.info("Processing areas in parallel...")
+            processed_results = Parallel(n_jobs=n_jobs, verbose=10)(
+                delayed(_process_single_area)(task) for task in tasks
+            )
+        except MemoryError as e:
+            logger.error(f"Memory error during parallel processing: {e}")
+            logger.info(
+                "Switching to single-threaded processing due to memory constraints."
+            )
+            processed_results = [_process_single_area(task) for task in tqdm(tasks)]
 
-        # Convert the results to a dataframe
+        # Filter out None results (skipped areas) and create a dataframe
+        results = {}
+        for res_tuple in processed_results:
+            if res_tuple is not None:
+                area_id, data = res_tuple
+                results[area_id] = data
         results_df = pd.DataFrame.from_dict(results, orient="index")
 
-        # if the dataframe is empty, create an empty dataframe with the same columns
-        if results_df.empty:
+        # Ensure correct dtypes if dataframe is not empty but some columns might be all NaN
+        if not results_df.empty:
+            expected_columns = {
+                "mean_elevation_diff": float,
+                "mean_uncertainty_unscaled": float,
+                "area": float,
+                "effective_samples": float,
+                "uncertainty": float,
+            }
+            for col, dtype in expected_columns.items():
+                if col in results_df.columns:
+                    results_df[col] = results_df[col].astype(dtype)
+                else:  # if a column is missing because all areas were skipped before its calculation
+                    results_df[col] = pd.Series(dtype=dtype)
+        else:  # create an empty dataframe with the same columns
             results_df = pd.DataFrame(
                 columns=[
                     "mean_elevation_diff",
                     "mean_uncertainty_unscaled",
+                    "area",
                     "effective_samples",
                     "uncertainty",
                 ]
