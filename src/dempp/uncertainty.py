@@ -27,6 +27,110 @@ if not logger.handlers:
     logger.setLevel(logging.INFO)
 
 
+def _process_single_area(params):
+    """Process a single area to compute uncertainty.
+
+    Args:
+        params (dict): Dictionary containing all required parameters:
+            - idx_row_tuple: Tuple containing (index, row) for the area
+            - work_vector: Vector with all areas
+            - column_name: Column name for area identification
+            - ref_dem: Reference DEM
+            - dh: Elevation difference DEM
+            - sigma_dh: Error/uncertainty map
+            - variogram_params: Parameters for variogram model
+            - min_area_fraction: Minimum area fraction to process
+            - neff_args: Arguments for effective number of samples calculation
+            - dem_path_name: DEM path name for logging
+
+    Returns:
+        tuple or None: Tuple containing area_id and result dict, or None if skipped
+    """
+    import logging
+
+    import numpy as np
+    import xdem
+
+    logger = logging.getLogger("dempp")
+
+    # Extract parameters
+    idx_row_tuple = params["idx_row_tuple"]
+    work_vector = params["work_vector"]
+    column_name = params["column_name"]
+    ref_dem = params["ref_dem"]
+    dh = params["dh"]
+    sigma_dh = params["sigma_dh"]
+    variogram_params = params["variogram_params"]
+    min_area_fraction = params["min_area_fraction"]
+    neff_args = params.get("neff_args", {})
+    dem_path_name = params.get("dem_path_name", "DEM")
+
+    # Extract area information
+    idx, row = idx_row_tuple
+    area_id = row[column_name]
+    logger.info(f"Processing area: {area_id}")
+
+    # Extract the geometry without copying the entire vector
+    geom = shape(work_vector.ds.iloc[idx].geometry)
+
+    # Create a minimal single geometry Vector with just what's needed
+    gdf = gpd.GeoDataFrame({"geometry": [geom]}, crs=work_vector.crs)
+    single_geom = Vector(gdf)
+
+    # Create area mask
+    area_mask = single_geom.create_mask(ref_dem)
+
+    # Check if the mask contains any valid pixels
+    if not np.any(area_mask):
+        logger.warning(f"Area {area_id} has no valid pixels - skipping")
+        return None
+
+    # Check if the DEM covers at least min_area_fraction of the area
+    dem_px_in_area = len(dh[area_mask].compressed())
+    area_coverage = dem_px_in_area / np.sum(area_mask)
+    if area_coverage < min_area_fraction:
+        logger.info(
+            f"{dem_path_name} covers only {area_coverage:.2%} of the area {area_id}. "
+            f"It's less than the minimum fraction {min_area_fraction:.2%} - skipping"
+        )
+        return None
+
+    # Compute the mean elevation difference in the area and the mean sigma
+    dh_area = np.nanmean(dh[area_mask])
+    mean_sig = np.nanmean(sigma_dh[area_mask])
+
+    # Calculate effective number of samples
+    n_eff = xdem.spatialstats.number_effective_samples(
+        area=single_geom, params_variogram_model=variogram_params, **neff_args
+    )
+
+    # Rescale the standard deviation of the mean elevation difference with the effective number of samples
+    sig_dh_area = (
+        mean_sig / np.sqrt(n_eff) if n_eff > 0 else np.nan
+    )  # Avoid division by zero or sqrt of negative
+
+    err_perc = (
+        sig_dh_area / abs(dh_area) * 100
+        if dh_area != 0 and not np.isnan(sig_dh_area)
+        else float("inf")
+    )
+
+    logger.info(
+        f"Area {area_id}: Mean elevation difference: {dh_area:.2f} ± {sig_dh_area:.2f} m "
+        f"({err_perc:.2f}%) - neff samples: {n_eff:.2f}."
+    )
+
+    logger.info(f"Completed uncertainty calculation for area {area_id}")
+
+    return area_id, {
+        "mean_elevation_diff": dh_area,
+        "mean_uncertainty_unscaled": mean_sig,
+        "area": single_geom.area.iloc[0],
+        "effective_samples": n_eff,
+        "uncertainty": sig_dh_area,
+    }
+
+
 def analyze_dem_uncertainty(
     ref_dem_path: str | Path,
     dem_path: str | Path,
@@ -481,7 +585,7 @@ class UncertaintyAnalyzer:
             new_array=dh_err_fun(
                 tuple([self.predictors[key].data for key in var_names])
             )
-        )
+        ).set_mask(self.dem.data.mask)
 
         # Save the results
         self.df_binned = df
@@ -888,71 +992,24 @@ class UncertaintyAnalyzer:
             logger.debug("Converting vector from geographic to projected CRS")
             work_vector = work_vector.to_crs(crs=work_vector.ds.estimate_utm_crs())
 
-        # Helper function to process a single area
-        def _process_single_area(idx_row_tuple):
-            """Process a single area to compute uncertainty."""
-            idx, row = idx_row_tuple
-            area_id = row[column_name]
-            logger.info(f"Processing area: {area_id}")
-
-            # Extract the geometry without copying the entire vector
-            geom = shape(work_vector.ds.iloc[idx].geometry)
-            single_geom = Vector(
-                gpd.GeoDataFrame({"geometry": [geom]}, crs=work_vector.crs)
-            )
-            area_mask = single_geom.create_mask(self.ref_dem)
-
-            # Check if the mask contains any valid pixels
-            if not np.any(area_mask):
-                logger.warning(f"Area {area_id} has no valid pixels - skipping")
-                return None
-
-            # Check if the DEM covers at least min_area_fraction of the area
-            dem_px_in_area = len(self.dh[area_mask].compressed())
-            area_coverage = dem_px_in_area / np.sum(area_mask)
-            if area_coverage < min_area_fraction:
-                logger.info(
-                    f"DEM {self.dem_path.name} covers only {area_coverage:.2%} of the area {area_id}. It's less than the minimum fraction {min_area_fraction:.2%} - skipping"
-                )
-                return None
-
-            # Compute the mean elevation difference in the area and the mean sigma
-            dh_area = np.nanmean(self.dh[area_mask])
-            mean_sig = np.nanmean(self.sigma_dh[area_mask])
-
-            # Calculate effective number of samples
-            n_eff = xdem.spatialstats.number_effective_samples(
-                area=single_geom,
-                params_variogram_model=self.variogram_params,
-                **neff_args or {},
-            )
-
-            # Rescale the standard deviation of the mean elevation difference with the effective number of samples
-            sig_dh_area = (
-                mean_sig / np.sqrt(n_eff) if n_eff > 0 else np.nan
-            )  # Avoid division by zero or sqrt of negative
-            err_perc = (
-                sig_dh_area / abs(dh_area) * 100
-                if dh_area != 0 and not np.isnan(sig_dh_area)
-                else float("inf")
-            )
-            logger.info(
-                f"Area {area_id}: Mean elevation difference: {dh_area:.2f} ± {sig_dh_area:.2f} m ({err_perc:.2f}%) - neff samples: {n_eff:.2f}.",
-            )
-
-            logger.info(f"Completed uncertainty calculation for area {area_id}")
-            return area_id, {
-                "mean_elevation_diff": dh_area,
-                "mean_uncertainty_unscaled": mean_sig,
-                "area": single_geom.area.iloc[0],
-                "effective_samples": n_eff,
-                "uncertainty": sig_dh_area,
-            }
-
         # Process each geometry in the vector in parallel
-        # We iterate over items of ds.iterrows() which yields (index, Series)
-        # To make it picklable for joblib, we pass the index and a dictionary representation of the row. However, work_vector.ds.iloc[[idx]] inside the helper function is more robust.
-        tasks = list(work_vector.ds.iterrows())
+        # Prepare tasks for parallel processing with all required parameters
+        tasks = []
+        for idx, row in work_vector.ds.iterrows():
+            params = {
+                "idx_row_tuple": (idx, row),
+                "work_vector": work_vector,
+                "column_name": column_name,
+                "ref_dem": self.ref_dem,
+                "dh": self.dh,
+                "sigma_dh": self.sigma_dh,
+                "variogram_params": self.variogram_params,
+                "min_area_fraction": min_area_fraction,
+                "neff_args": neff_args or {},
+                "dem_path_name": str(self.dem_path.name),
+            }
+            tasks.append(params)
+
         try:
             logger.info("Processing areas in parallel...")
             processed_results = Parallel(n_jobs=n_jobs, verbose=10)(
@@ -963,7 +1020,11 @@ class UncertaintyAnalyzer:
             logger.info(
                 "Switching to single-threaded processing due to memory constraints."
             )
-            processed_results = [_process_single_area(task) for task in tqdm(tasks)]
+            processed_results = []
+            for task in tqdm(tasks):
+                # Force a lower resolution for rasterization
+                task["neff_args"] = {"rasterize_resolution": 50}
+                processed_results.append(_process_single_area(task))
 
         # Filter out None results (skipped areas) and create a dataframe
         results = {}
