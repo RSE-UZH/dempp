@@ -20,7 +20,7 @@ classifiers = [
     "Programming Language :: Python :: 3",
 ]
 dependencies = [
-    "numpy<2.0",
+    "numpy",
     "matplotlib",
     "pandas",
     "opencv-python",
@@ -28,7 +28,6 @@ dependencies = [
     "pyproj",
     "tqdm",
     "xdem",
-    "geoutils",
     "omegaconf",
     "dask",
     "geopandas",
