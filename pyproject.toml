@@ -22,7 +22,7 @@ classifiers = [
 dependencies = [
     "numpy<=2.3",
     "xdem",
-    "geoutils<=0.1.15",
+    "geoutils<=0.1.16",
     "geopandas<=1.0.1",
     "pandas",
     "matplotlib",
