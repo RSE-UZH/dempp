@@ -27,7 +27,7 @@ dependencies = [
     "pandas",
     "matplotlib",
     "opencv-python",
-    "rasterio",
+    "rasterio<=1.4.3",
     "pyproj",
     "tqdm",
     "omegaconf",
