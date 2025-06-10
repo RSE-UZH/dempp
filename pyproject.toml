@@ -20,7 +20,7 @@ classifiers = [
     "Programming Language :: Python :: 3",
 ]
 dependencies = [
-    "numpy<=2.3,",
+    "numpy<=2.3",
     "matplotlib",
     "pandas",
     "opencv-python",
