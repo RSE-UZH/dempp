@@ -24,7 +24,7 @@ dependencies = [
     "xdem",
     "geoutils<=0.1.16",
     "geopandas<=1.0.1",
-    "pandas",
+    "pandas<=2.3.0",
     "matplotlib",
     "opencv-python",
     "rasterio<=1.4.3",
