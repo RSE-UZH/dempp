@@ -140,7 +140,7 @@ def analyze_dem_uncertainty(
     )
 
     # Compute elevation difference
-    compute_elevation_difference(data, get_statistics=True)
+    data.dh, _ = compute_elevation_difference(data, get_statistics=True)
 
     # Extract terrain features
     if compute_terrain_features:
@@ -149,7 +149,11 @@ def analyze_dem_uncertainty(
         extract_terrain_features(data, attribute=attibute_list, compute_abs_maxc=True)
 
     # Analyze heteroscedasticity
-    analyze_heteroscedasticity(data)
+    df_binned, zscores, dh_err_fun, sigma_dh = analyze_heteroscedasticity(data)
+    data.df_binned = df_binned
+    data.zscores = zscores
+    data.dh_err_fun = dh_err_fun
+    data.sigma_dh = sigma_dh
     if output_dir is not None:
         plot_dir = Path(output_dir)
         plot_dir.mkdir(parents=True, exist_ok=True)
@@ -162,7 +166,10 @@ def analyze_dem_uncertainty(
         data.to_pickle(output_dir / "analyzer_state_intermediate.pkl")
 
     # Analyze spatial correlation
-    analyze_spatial_correlation(data)
+    df_vgm, func_sum_vgm, params_vgm = analyze_spatial_correlation(data)
+    data.variogram_data = df_vgm
+    data.variogram_function = func_sum_vgm
+    data.variogram_params = params_vgm
     if output_dir is not None:
         plot_variogram(data, path=output_dir / "variogram.png")
         data.variogram_params.to_csv(
@@ -290,10 +297,10 @@ def compute_elevation_difference(data, get_statistics=True):
         tuple: (elevation difference DEM, stats dict)
     """
     logger.info("Computing elevation difference...")
-    data.dh = data.ref_dem - data.dem
+    dh = data.ref_dem - data.dem
 
     if get_statistics:
-        stats = data.dh.get_stats(inlier_mask=data.stable_mask)
+        stats = dh.get_stats(inlier_mask=data.stable_mask)
         logger.info("Elevation difference statistics:")
         for key, value in stats.items():
             logger.info(f"\t{key}: {value:.2f}")
@@ -301,7 +308,7 @@ def compute_elevation_difference(data, get_statistics=True):
         stats = None
 
     logger.info("Elevation difference computed.")
-    return data.dh, stats
+    return dh, stats
 
 
 def extract_terrain_features(data, attribute=None, compute_abs_maxc=True):
@@ -471,12 +478,6 @@ def analyze_heteroscedasticity(
     )
     sigma_dh.set_mask(data.dem.data.mask)
 
-    # Save the results
-    data.df_binned = df
-    data.zscores = zscores
-    data.dh_err_fun = dh_err_fun
-    data.sigma_dh = sigma_dh
-
     logger.info("Heteroscedasticity analysis completed.")
     return df, zscores, dh_err_fun, sigma_dh
 
@@ -509,7 +510,7 @@ def analyze_spatial_correlation(
         fit_kwargs: Additional fitting arguments
 
     Returns:
-        tuple: (variogram_function, variogram_params)
+        tuple: (variogram_data, variogram_function, variogram_params)
     """
     logger.info("Analyzing spatial correlation...")
     if data.sigma_dh is None:
@@ -545,12 +546,8 @@ def analyze_spatial_correlation(
         **(fit_kwargs or {}),
     )
 
-    data.variogram_data = df_vgm
-    data.variogram_function = func_sum_vgm
-    data.variogram_params = params_vgm
-
     logger.info("Spatial correlation analysis completed.")
-    return func_sum_vgm, params_vgm
+    return df_vgm, func_sum_vgm, params_vgm
 
 
 def compute_uncertainty_for_area(
@@ -988,6 +985,7 @@ def plot_variogram(
         path: Path to save plot
         ax: Axes to plot on
         **kwargs: Additional plotting arguments
+
     """
     from pathlib import Path
 
