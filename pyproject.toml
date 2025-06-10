@@ -23,7 +23,7 @@ dependencies = [
     "numpy<=2.3",
     "xdem",
     "geoutils<=0.1.15",
-    "geopandas<1.0.1",
+    "geopandas<=1.0.1",
     "pandas",
     "matplotlib",
     "opencv-python",
