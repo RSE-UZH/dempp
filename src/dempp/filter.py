@@ -9,6 +9,7 @@ import geopandas as gpd
 import numpy as np
 import rasterio
 import xdem
+from geoutils.stats import nmad
 from joblib import Parallel, delayed
 from rasterio import features
 from rasterio.errors import WindowError
@@ -18,7 +19,6 @@ from tqdm import tqdm
 from tqdm.contrib.logging import logging_redirect_tqdm
 from xdem._typing import NDArrayf
 from xdem.filters import gaussian_filter_cv
-from xdem.spatialstats import nmad
 
 logger = logging.getLogger("dempp")
 
@@ -149,8 +149,8 @@ def _normal_filter(
         np.ndarray: Boolean array marking outliers (True = outlier)
     """
     outliers = np.zeros_like(values, dtype=bool)
-    mean = np.mean(values)
-    std = np.std(values)
+    mean = np.nanmean(values)
+    std = np.nanstd(values)
     outliers = np.abs(values - mean) > n_limit * std
 
     logger.debug(
@@ -180,7 +180,7 @@ def _nmad_filter(
         np.ndarray: Boolean array marking outliers (True = outlier)
     """
     outliers = np.zeros_like(values, dtype=bool)
-    median = np.median(values)
+    median = np.nanmedian(values)
     mad_value = nmad(values)
     outliers = np.abs(values - median) > outlier_threshold * mad_value
 
