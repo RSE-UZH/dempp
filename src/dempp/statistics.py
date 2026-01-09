@@ -314,13 +314,9 @@ def _compute_statistics(
         percentile75 = np.percentile(array, 75)
 
     # Handle array-like percentile outputs
-    percentile25_val = (
-        percentile25[0] if hasattr(percentile25, "__len__") else percentile25
-    )
-    median_val = median[0] if hasattr(median, "__len__") else median
-    percentile75_val = (
-        percentile75[0] if hasattr(percentile75, "__len__") else percentile75
-    )
+    median_val = median[0] if np.ndim(median) > 0 else median
+    percentile25_val = percentile25[0] if np.ndim(percentile25) > 0 else percentile25
+    percentile75_val = percentile75[0] if np.ndim(percentile75) > 0 else percentile75
 
     # Always compute NMAD with direct NumPy since it's a specialized function
     nmad_val = xdem.spatialstats.nmad(array)
