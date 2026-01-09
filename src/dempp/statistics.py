@@ -676,6 +676,12 @@ def save_stats_to_file(
         """Format single value with proper type conversion."""
         if isinstance(value, (np.integer | np.floating)):
             value = value.item()
+        elif isinstance(value, np.ndarray):
+            # Handle numpy arrays (both 0-d scalars and multi-d arrays)
+            if value.ndim == 0:
+                value = value.item()
+            else:
+                value = value.tolist()
         if isinstance(value, float):
             return str(round(value, float_precision))
         return value
