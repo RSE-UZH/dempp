@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any
 
 import geopandas as gpd
 import numpy as np
@@ -30,39 +30,6 @@ class OutlierMethod(Enum):
     ZSCORE = "zscore"  # z-score
     NORMAL = "normal"  # mean/std
     DISTANCE = "distance"  # Distance filter
-
-
-def distance_filter(
-    array: NDArrayf,
-    radius: float,
-    outlier_threshold: float,
-) -> NDArrayf:
-    """
-    Filter out pixels whose value is distant from the average of neighboring pixels.
-
-    This function identifies pixels whose value differs from their neighborhood average
-    by more than a specified threshold and sets them to NaN.
-
-    Args:
-        array: Input array to be filtered
-        radius: Radius (in pixels) within which to calculate the average value
-        outlier_threshold: Minimum absolute difference between pixel value and local
-                          average for a pixel to be considered an outlier
-
-    Returns:
-        NDArrayf: Boolean array identifying outlier pixels (True = outlier)
-
-    Todo:
-        Add options for different averaging methods (Gaussian, median, etc.)
-    """
-    logger.debug(
-        f"Running distance filter with radius={radius}, threshold={outlier_threshold}"
-    )
-    outliers = _distance_filter(array, radius, outlier_threshold)
-    out_array = np.copy(array)
-    out_array[outliers] = np.nan
-
-    return outliers
 
 
 def _distance_filter(
@@ -193,10 +160,10 @@ def _nmad_filter(
 
 def find_outliers(
     dem_path: Path | str,
-    boundary: Optional[Union[gpd.GeoDataFrame, Dict[str, Any]]] = None,
-    method: Union[OutlierMethod, str] = OutlierMethod.NMAD,
+    boundary: gpd.GeoDataFrame | dict[str, Any] | None = None,
+    method: OutlierMethod | str = OutlierMethod.NMAD,
     **kwargs,
-) -> Tuple[Optional[np.ndarray], Optional[Window]]:
+) -> tuple[np.ndarray | None, Window | None]:
     """
     Process a DEM within a specified boundary and identify outliers.
 
@@ -347,12 +314,12 @@ def find_outliers(
 
 
 def filter_dem_by_geometry(
-    dem_path: Union[Path, str],
-    geometry_path: Union[Path, str],
+    dem_path: Path | str,
+    geometry_path: Path | str,
     method: OutlierMethod = OutlierMethod.NMAD,
     n_jobs: int = -1,
     **kwargs,
-) -> Tuple[xdem.DEM, np.ndarray]:
+) -> tuple[xdem.DEM, np.ndarray]:
     """
     Process a DEM using multiple geometries (e.g., glacier polygons) and identify outliers.
 
@@ -424,11 +391,11 @@ def filter_dem_by_geometry(
 
 
 def filter_dem(
-    dem_path: Union[Path, str],
-    boundary_path: Optional[Union[Path, str]] = None,
-    method: Union[OutlierMethod, List[OutlierMethod]] = OutlierMethod.NMAD,
+    dem_path: Path | str,
+    boundary_path: Path | str | None = None,
+    method: OutlierMethod | list[OutlierMethod] = OutlierMethod.NMAD,
     **kwargs,
-) -> Tuple[xdem.DEM, np.ndarray]:
+) -> tuple[xdem.DEM, np.ndarray]:
     """
     Filter a DEM to identify and remove outliers, optionally within a specified boundary.
 
@@ -487,9 +454,9 @@ def filter_dem(
 
 
 def apply_mask_to_dem(
-    dem_path: Union[Path, str],
+    dem_path: Path | str,
     mask: np.ndarray,
-    output_path: Optional[Union[Path, str]] = None,
+    output_path: Path | str | None = None,
 ) -> xdem.DEM | None:
     """
     Apply a mask to a DEM, setting masked pixels to NaN, and optionally save the result.
